@@ -201,18 +201,8 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
           );
         } catch (playerErr) {
           console.error('Failed to create player:', playerErr);
-          // Continue anyway - the PlayerView will retry
+          // We'll proceed to player view anyway and retry there
         }
-      }
-
-      // Create shareable link
-      const shareableUrl = `${window.location.origin}${window.location.pathname}?pin=${pin}`;
-      try {
-        navigator.clipboard.writeText(shareableUrl)
-          .then(() => console.log('Shareable link copied to clipboard'))
-          .catch(err => console.error('Could not copy link: ', err));
-      } catch (clipboardErr) {
-        console.error("Error accessing clipboard:", clipboardErr);
       }
 
       setLoading(false);
@@ -275,6 +265,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   const [deckName, setDeckName] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   // Generate PIN and create session on component mount
   useEffect(() => {
@@ -295,6 +286,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             })
           );
           setSessionData(newSession);
+          console.log('Created session with PIN:', generatedPin);
         } catch (err) {
           console.error('Failed to create session:', err);
           setError('Failed to create session. Please try again.');
@@ -316,37 +308,78 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   // Create shareable link when PIN is set
   useEffect(() => {
     if (pin) {
-      const shareableUrl = `${window.location.origin}${window.location.pathname}?pin=${pin}`;
+      const shareableUrl = `${window.baseUrl || window.location.origin + window.location.pathname}?pin=${pin}`;
       console.log('Shareable link:', shareableUrl);
     }
   }, [pin]);
 
-  // Subscribe to players in this session
+  // Subscribe to players in this session - FIXED: improved reliability
   useEffect(() => {
     if (pin) {
-      try {
-        return room.collection('player').filter({ session_pin: pin }).subscribe(playersList => {
-          setPlayers(playersList);
-        });
-      } catch (err) {
-        console.error("Error subscribing to players:", err);
-      }
+      const subscribeToPlayers = () => {
+        try {
+          return room.collection('player')
+            .filter({ session_pin: pin })
+            .subscribe(playersList => {
+              console.log('Players updated:', playersList);
+              setPlayers(playersList || []);
+            });
+        } catch (err) {
+          console.error("Error subscribing to players:", err);
+          // Retry subscription after a delay
+          setTimeout(subscribeToPlayers, 3000);
+          return () => {}; // Return empty unsubscribe function
+        }
+      };
+      
+      return subscribeToPlayers();
     }
   }, [pin]);
 
-  // Subscribe to decks in this session
+  // Force update player list periodically to ensure it's current
   useEffect(() => {
     if (pin) {
-      try {
-        return room.collection('deck').filter({ session_pin: pin }).subscribe(decksList => {
-          setDecks(decksList);
-          if (decksList.length > 0 && !currentDeck) {
-            setCurrentDeck(decksList[0].id);
+      const interval = setInterval(async () => {
+        try {
+          const latestPlayers = await room.collection('player')
+            .filter({ session_pin: pin })
+            .getList();
+          
+          if (latestPlayers && latestPlayers.length > 0) {
+            setPlayers(latestPlayers);
           }
-        });
-      } catch (err) {
-        console.error("Error subscribing to decks:", err);
-      }
+        } catch (err) {
+          console.error("Failed to refresh player list:", err);
+        }
+      }, 10000); // Refresh every 10 seconds
+      
+      return () => clearInterval(interval);
+    }
+  }, [pin]);
+
+  // Subscribe to decks in this session - FIXED: improved reliability
+  useEffect(() => {
+    if (pin) {
+      const subscribeToDecks = () => {
+        try {
+          return room.collection('deck')
+            .filter({ session_pin: pin })
+            .subscribe(decksList => {
+              console.log('Decks updated:', decksList);
+              setDecks(decksList || []);
+              if (decksList && decksList.length > 0 && !currentDeck) {
+                setCurrentDeck(decksList[0].id);
+              }
+            });
+        } catch (err) {
+          console.error("Error subscribing to decks:", err);
+          // Retry subscription after a delay
+          setTimeout(subscribeToDecks, 3000);
+          return () => {}; // Return empty unsubscribe function
+        }
+      };
+      
+      return subscribeToDecks();
     }
   }, [pin]);
 
@@ -513,17 +546,19 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     });
   };
 
+  // FIXED: Improved file upload to handle larger files and prevent timeouts
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
     setLoading(true);
     setError(null);
+    setUploadProgress(0);
 
     // Add a size limit to prevent timeouts
-    const MAX_FILE_SIZE = 1 * 1024 * 1024; // 1MB to be safer
+    const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB
     if (file.size > MAX_FILE_SIZE) {
-      alert('File is too large (max 1MB). Please split into smaller files.');
+      alert('File is too large (max 2MB). Please split into smaller files.');
       setLoading(false);
       setFileInput('');
       return;
@@ -535,32 +570,39 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         const data = JSON.parse(e.target.result);
         
         // Function to process decks with a delay to prevent timeouts
-        const processDecksWithDelay = async (items, processFn) => {
+        const processDecksWithDelay = async (items) => {
+          const totalItems = items.length;
           const results = [];
+          
           // Process in smaller batches
-          const BATCH_SIZE = 1; // Process one at a time to avoid timeouts
+          const BATCH_SIZE = 1; // Process one at a time for reliability
           
           for (let i = 0; i < items.length; i += BATCH_SIZE) {
             const batch = items.slice(i, i + BATCH_SIZE);
-            // Process batch
-            const batchPromises = batch.map(processFn);
-            const batchResults = await Promise.allSettled(batchPromises);
             
-            // Add successful results
-            batchResults.forEach((result, index) => {
-              if (result.status === 'fulfilled') {
-                results.push(result.value);
-              } else {
-                console.error(`Failed to process item ${i + index}:`, result.reason);
-                setError(`Failed to process deck ${i + index + 1}. Try a smaller file.`);
+            // Update progress
+            setUploadProgress(Math.floor((i / totalItems) * 100));
+            
+            try {
+              // Process current batch
+              for (const deck of batch) {
+                if (deck.name && Array.isArray(deck.cards)) {
+                  const result = await createDeck(deck.name, deck.cards);
+                  results.push(result);
+                }
               }
-            });
-            
-            // Add a small delay between batches to prevent timeout
-            if (i + BATCH_SIZE < items.length) {
-              await new Promise(resolve => setTimeout(resolve, 500));
+              
+              // Add a small delay between batches
+              if (i + BATCH_SIZE < items.length) {
+                await new Promise(resolve => setTimeout(resolve, 300));
+              }
+            } catch (err) {
+              console.error(`Error processing batch at index ${i}:`, err);
+              // Continue with next batch despite errors
             }
           }
+          
+          setUploadProgress(100);
           return results;
         };
 
@@ -572,36 +614,41 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           await createDeck(data.name || file.name.replace('.json', ''), data.cards);
         } else if (data.decks && Array.isArray(data.decks)) {
           // Multiple decks format
-          await processDecksWithDelay(data.decks, async (deck) => {
-            if (deck.name && Array.isArray(deck.cards)) {
-              return await createDeck(deck.name, deck.cards);
-            }
-          });
+          await processDecksWithDelay(data.decks);
         } else {
           setError('Invalid JSON format. Expected an array of strings or object with cards array.');
         }
         
         setLoading(false);
+        setUploadProgress(0);
       } catch (err) {
         setError('Failed to parse JSON: ' + (err.message || 'Unknown error'));
         setLoading(false);
+        setUploadProgress(0);
       }
     };
     
     reader.onerror = function() {
       setError('Error reading file');
       setLoading(false);
+      setUploadProgress(0);
     };
     
     reader.readAsText(file);
     setFileInput('');
   };
 
+  // FIXED: Improved deck creation to handle larger decks reliably
   const createDeck = async (name, cards) => {
     try {
+      // Validate inputs
+      if (!name || !cards || !Array.isArray(cards) || cards.length === 0) {
+        throw new Error("Invalid deck data");
+      }
+      
       // Use a more unique deck name to avoid conflicts
       const timestamp = new Date().getTime();
-      const uniqueName = `${name}_${timestamp}`;
+      const uniqueName = `${name.substring(0, 30)}_${timestamp}`;
 
       // Limit the size of each card to prevent payload issues
       const processedCards = cards.map(card => {
@@ -609,10 +656,16 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           return card.substring(0, 500); // Limit to 500 chars
         }
         return card;
-      });
+      }).filter(card => card && typeof card === 'string' && card.trim().length > 0);
+
+      if (processedCards.length === 0) {
+        throw new Error("No valid cards found in deck");
+      }
+
+      console.log(`Creating deck "${uniqueName}" with ${processedCards.length} cards`);
 
       // Split large decks into chunks to prevent timeouts
-      const MAX_CARDS_PER_DECK = 50; // Smaller limit for better reliability
+      const MAX_CARDS_PER_DECK = 30; // Smaller limit for better reliability
       if (processedCards.length > MAX_CARDS_PER_DECK) {
         const chunks = [];
         for (let i = 0; i < processedCards.length; i += MAX_CARDS_PER_DECK) {
@@ -626,7 +679,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           
           // Add a small delay between chunks
           if (i < chunks.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise(resolve => setTimeout(resolve, 300));
           }
         }
         
@@ -644,6 +697,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   // Helper function to create a single deck
   const createDeckChunk = async (name, cards) => {
     try {
+      // Create a new deck with retry logic
       const newDeck = await safeRoomOperation(() =>
         room.collection('deck').create({
           session_pin: pin,
@@ -667,15 +721,19 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     }
   };
 
+  // FIXED: Improved text submission for deck creation
   const handleTextSubmit = async () => {
     if (!textInput.trim() || !deckName.trim()) {
-      alert('Please enter deck name and cards');
+      alert('Please enter both deck name and cards');
       return;
     }
 
-    const cards = textInput.split('\n').filter(line => line.trim());
+    const cards = textInput.split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+      
     if (cards.length === 0) {
-      alert('No cards found');
+      alert('No valid cards found');
       return;
     }
 
@@ -726,7 +784,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         <h2 className="header">Session PIN: {pin}</h2>
         <p>Share this PIN with players to join (max 10)</p>
         <button className="btn" onClick={() => {
-          const url = `${window.location.origin}${window.location.pathname}?pin=${pin}`;
+          const url = `${window.baseUrl || window.location.origin + window.location.pathname}?pin=${pin}`;
           try {
             navigator.clipboard.writeText(url);
             alert('Shareable link copied to clipboard');
@@ -751,6 +809,21 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             disabled={loading}
           />
           <p className="helper-text">Accepts single deck (array of strings), deck object {`{ name, cards }`}, or multiple decks {`{ decks: [{ name, cards }] }`}</p>
+          {loading && uploadProgress > 0 && (
+            <div style={{ marginTop: '10px' }}>
+              <div style={{ width: '100%', backgroundColor: '#eee', borderRadius: '4px', overflow: 'hidden' }}>
+                <div 
+                  style={{
+                    width: `${uploadProgress}%`, 
+                    backgroundColor: 'black', 
+                    height: '10px', 
+                    transition: 'width 0.3s ease'
+                  }}
+                ></div>
+              </div>
+              <p>Uploading: {uploadProgress}%</p>
+            </div>
+          )}
         </div>
 
         <div className="mb-4">
@@ -795,7 +868,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
               >
                 {decks.map(deck => (
                   <option key={deck.id} value={deck.id}>
-                    {deck.name} ({deck.cards.length} cards)
+                    {deck.name} ({deck.cards?.length || 0} cards)
                   </option>
                 ))}
               </select>
@@ -905,8 +978,9 @@ function PlayerView({ pin, playerName, setView }) {
   const [playerId, setPlayerId] = useState(null);
   const [isSessionActive, setIsSessionActive] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [retries, setRetries] = useState(0);
 
-  // Find player record and subscribe to changes
+  // Find player record and subscribe to changes - FIXED: improved reliability
   useEffect(() => {
     const setupPlayer = async () => {
       try {
@@ -924,7 +998,7 @@ function PlayerView({ pin, playerName, setView }) {
           return;
         }
 
-        // First try to find the existing player
+        // Try to find the existing player
         let players = await safeRoomOperation(() => 
           room.collection('player').filter({ 
             session_pin: pin, 
@@ -940,34 +1014,46 @@ function PlayerView({ pin, playerName, setView }) {
           
           // Try to create the player with retries
           let playerCreated = false;
+          let maxCreateRetries = 3;
+          let createRetryCount = 0;
           
-          try {
-            const newPlayer = await safeRoomOperation(() => 
-              room.collection('player').create({
-                session_pin: pin,
-                name: playerName,
-                current_card: null,
-                expires_at: null,
-              })
-            );
-            console.log('Created new player:', newPlayer);
-            setPlayerId(newPlayer.id);
-            playerCreated = true;
-          } catch (createErr) {
-            console.error(`Failed to create player:`, createErr);
-            
-            // Check if player was actually created despite the error
-            players = await safeRoomOperation(() => 
-              room.collection('player').filter({ 
-                session_pin: pin, 
-                name: playerName 
-              }).getList()
-            );
-            
-            if (players && players.length > 0) {
-              console.log('Player was created despite error');
-              setPlayerId(players[0].id);
+          while (!playerCreated && createRetryCount < maxCreateRetries) {
+            try {
+              const newPlayer = await safeRoomOperation(() => 
+                room.collection('player').create({
+                  session_pin: pin,
+                  name: playerName,
+                  current_card: null,
+                  expires_at: null,
+                })
+              );
+              console.log('Created new player:', newPlayer);
+              setPlayerId(newPlayer.id);
               playerCreated = true;
+            } catch (createErr) {
+              console.error(`Failed to create player (attempt ${createRetryCount + 1}):`, createErr);
+              createRetryCount++;
+              
+              // Check if player was actually created despite the error
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              
+              players = await safeRoomOperation(() => 
+                room.collection('player').filter({ 
+                  session_pin: pin, 
+                  name: playerName 
+                }).getList()
+              );
+              
+              if (players && players.length > 0) {
+                console.log('Player was created despite error');
+                setPlayerId(players[0].id);
+                playerCreated = true;
+                break;
+              }
+            }
+            
+            if (!playerCreated) {
+              await new Promise(resolve => setTimeout(resolve, 1000 * createRetryCount));
             }
           }
           
@@ -982,78 +1068,133 @@ function PlayerView({ pin, playerName, setView }) {
 
         setLoading(false);
 
-        // Subscribe to player changes
-        try {
-          return room.collection('player').filter({ 
-            session_pin: pin, 
-            name: playerName 
-          }).subscribe(playersList => {
-            if (playersList && playersList.length > 0) {
-              const player = playersList[0];
-              setCurrentCard(player.current_card);
+        // Subscribe to player changes - FIXED: Improved reliability
+        const subscribeToPlayerUpdates = () => {
+          try {
+            return room.collection('player')
+              .filter({ session_pin: pin, name: playerName })
+              .subscribe(playersList => {
+                if (playersList && playersList.length > 0) {
+                  const player = playersList[0];
+                  setCurrentCard(player.current_card);
 
-              if (player.expires_at) {
-                const expiry = new Date(player.expires_at).getTime();
-                const now = Date.now();
-                const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
+                  if (player.expires_at) {
+                    const expiry = new Date(player.expires_at).getTime();
+                    const now = Date.now();
+                    const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
+                    setTimeLeft(remaining);
 
-                // Calculate total time from session
-                const sessions = room.collection('session').filter({ pin }).getList();
-                if (sessions && sessions.length > 0) {
-                  const session = sessions[0];
-                  const maxDuration = session.max_time;
-                  const minDuration = session.min_time;
-                  const avgDuration = (maxDuration + minDuration) / 2;
-                  setTotalTime(avgDuration);
+                    // Calculate total time from remaining time and session settings
+                    const totalTimeEstimate = remaining + 5; // Add buffer for calculation
+                    setTotalTime(Math.max(totalTime, totalTimeEstimate));
+                  } else if (!player.current_card || player.current_card === 'END') {
+                    // Reset timer if no card or ended
+                    setTimeLeft(0);
+                  }
                 }
-
-                setTimeLeft(remaining);
-              }
-            }
-          });
-        } catch (subErr) {
-          console.error("Error subscribing to player updates:", subErr);
-          setError("Could not receive updates. Please refresh the page.");
-        }
+              });
+          } catch (subErr) {
+            console.error("Error subscribing to player updates:", subErr);
+            // Retry subscription after a delay
+            setTimeout(subscribeToPlayerUpdates, 3000);
+            return () => {}; // Return empty unsubscribe function
+          }
+        };
+        
+        return subscribeToPlayerUpdates();
       } catch (err) {
         console.error('Failed to setup player:', err);
-        setError('Failed to connect to session. Please try again.');
-        setLoading(false);
+        if (retries < 3) {
+          setRetries(retries + 1);
+          setTimeout(() => setupPlayer(), 2000); // Retry after delay
+        } else {
+          setError('Failed to connect to session. Please try again.');
+          setLoading(false);
+        }
       }
     };
 
     setupPlayer();
-  }, [pin, playerName]);
+  }, [pin, playerName, retries]);
 
-  // Subscribe to session
+  // Subscribe to session - FIXED: improved reliability
   useEffect(() => {
-    try {
-      return room.collection('session').filter({ pin }).subscribe(sessionsList => {
-        if (sessionsList && sessionsList.length > 0) {
-          setIsSessionActive(sessionsList[0].is_playing);
-        } else {
-          setError('Session not found');
+    if (pin) {
+      const subscribeToSession = () => {
+        try {
+          return room.collection('session')
+            .filter({ pin })
+            .subscribe(sessionsList => {
+              if (sessionsList && sessionsList.length > 0) {
+                const session = sessionsList[0];
+                setIsSessionActive(session.is_playing);
+                
+                // Update total time estimate from session settings
+                if (session.min_time && session.max_time) {
+                  const avgSessionTime = (session.min_time + session.max_time) / 2;
+                  if (!totalTime || avgSessionTime > totalTime) {
+                    setTotalTime(avgSessionTime);
+                  }
+                }
+              } else {
+                setError('Session not found');
+              }
+            });
+        } catch (err) {
+          console.error("Error subscribing to session:", err);
+          // Retry subscription after a delay
+          setTimeout(subscribeToSession, 3000);
+          return () => {}; // Return empty unsubscribe function
         }
-      });
-    } catch (err) {
-      console.error("Error subscribing to session:", err);
+      };
+      
+      return subscribeToSession();
     }
   }, [pin]);
 
-  // Timer to update time left
+  // Timer to update time left - FIXED: more accurate countdown
   useEffect(() => {
     if (currentCard && currentCard !== 'END' && timeLeft > 0) {
-      const timer = setTimeout(() => {
-        setTimeLeft(prev => Math.max(0, prev - 1));
+      const timer = setInterval(() => {
+        setTimeLeft(prev => {
+          const newTime = Math.max(0, prev - 1);
+          if (newTime === 0 && currentCard) {
+            // When timer hits zero, attempt to fetch updated card from server
+            try {
+              room.collection('player')
+                .filter({ session_pin: pin, name: playerName })
+                .getList()
+                .then(players => {
+                  if (players && players.length > 0) {
+                    setCurrentCard(players[0].current_card);
+                    if (players[0].expires_at) {
+                      const expiry = new Date(players[0].expires_at).getTime();
+                      const now = Date.now();
+                      const newRemaining = Math.max(0, Math.floor((expiry - now) / 1000));
+                      if (newRemaining > 0) {
+                        setTimeLeft(newRemaining);
+                      }
+                    }
+                  }
+                });
+            } catch (err) {
+              console.error("Error refreshing player data:", err);
+            }
+          }
+          return newTime;
+        });
       }, 1000);
 
-      return () => clearTimeout(timer);
+      return () => clearInterval(timer);
     }
-  }, [currentCard, timeLeft]);
+  }, [currentCard, timeLeft, pin, playerName]);
 
+  // FIXED: Improved progress calculation for better visual feedback
   const getProgressWidth = () => {
     if (timeLeft <= 0 || totalTime <= 0) return 0;
-    return (timeLeft / totalTime) * 100;
+    // Calculate percentage with a minimum to ensure visibility
+    const percentage = (timeLeft / totalTime) * 100;
+    return Math.max(1, percentage); // At least 1% width to show something is happening
   };
 
   if (loading) {
@@ -1099,12 +1240,22 @@ function PlayerView({ pin, playerName, setView }) {
     <div style={{ height: '100vh', position: 'relative' }}>
       {currentCard ? (
         <div className="fullscreen-card">
-          <div>
+          <div style={{ width: '100%' }}>
             <h1 className="card-text">{currentCard}</h1>
+            
+            {/* FIXED: Enhanced countdown visualization */}
+            <div style={{ marginTop: '30px', textAlign: 'center' }}>
+              <span style={{ fontSize: '24px', fontWeight: 'bold' }}>{timeLeft}</span>
+              <span style={{ fontSize: '18px' }}> seconds remaining</span>
+            </div>
+            
             <div className="timer-bar">
               <div
                 className="timer-progress"
-                style={{ width: `${getProgressWidth()}%` }}
+                style={{ 
+                  width: `${getProgressWidth()}%`,
+                  transition: 'width 1s linear'
+                }}
               ></div>
             </div>
           </div>
