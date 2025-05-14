@@ -4,24 +4,15 @@ const { createRoot } = ReactDOM;
 // Initialize WebsimSocket
 const room = new WebsimSocket();
 
-// Check if we're using the fallback implementation
-const isOutsideWebsim = room.isFallback === true;
-
 // Main App Component
 function App() {
   const [view, setView] = useState('home');
   const [pin, setPin] = useState('');
   const [playerName, setPlayerName] = useState('');
   const [sessionData, setSessionData] = useState(null);
-  const [playerData, setPlayerData] = useState(null);
 
   // Check URL params to see if we should join a session directly
   useEffect(() => {
-    // If outside Websim, show a direct message first
-    if (isOutsideWebsim) {
-      return;
-    }
-
     const params = new URLSearchParams(window.location.search);
     const pinParam = params.get('pin');
     if (pinParam) {
@@ -45,32 +36,15 @@ function App() {
   }, []);
 
   const renderView = () => {
-    // If outside Websim, show a message
-    if (isOutsideWebsim) {
-      return <OutsideWebsimView />;
-    }
-
     switch (view) {
       case 'home':
         return <HomeView setView={setView} />;
       case 'conductor':
         return <ConductorView setView={setView} sessionData={sessionData} setSessionData={setSessionData} />;
       case 'join':
-        return <JoinView 
-          pin={pin} 
-          setPin={setPin} 
-          playerName={playerName} 
-          setPlayerName={setPlayerName} 
-          setView={setView} 
-          setPlayerData={setPlayerData}
-        />;
+        return <JoinView pin={pin} setPin={setPin} playerName={playerName} setPlayerName={setPlayerName} setView={setView} />;
       case 'player':
-        return <PlayerView 
-          pin={pin} 
-          playerName={playerName} 
-          setView={setView} 
-          playerData={playerData}
-        />;
+        return <PlayerView pin={pin} playerName={playerName} setView={setView} />;
       default:
         return <HomeView setView={setView} />;
     }
@@ -79,30 +53,6 @@ function App() {
   return (
     <div className="container">
       {renderView()}
-    </div>
-  );
-}
-
-// View for users accessing outside Websim
-function OutsideWebsimView() {
-  return (
-    <div className="flex flex-col items-center gap-4">
-      <h1 className="header">Improv Card Distributor</h1>
-      <div className="card">
-        <h2 className="header">Direct Access Not Supported</h2>
-        <p>You're trying to access this application directly in your browser.</p>
-        <p>This app needs to be accessed through the Websim platform to function properly.</p>
-        <p className="mt-4">If someone shared a link with you:</p>
-        <ul style={{ listStyleType: 'disc', paddingLeft: '20px', margin: '10px 0' }}>
-          <li>Ask them to invite you through the Websim platform</li>
-          <li>They should share the PIN code with you instead of a direct link</li>
-        </ul>
-        <p className="mt-4">If you're the creator:</p>
-        <ul style={{ listStyleType: 'disc', paddingLeft: '20px', margin: '10px 0' }}>
-          <li>Return to Websim and access your project there</li>
-          <li>Share the PIN code rather than copying the URL directly</li>
-        </ul>
-      </div>
     </div>
   );
 }
@@ -125,7 +75,7 @@ function HomeView({ setView }) {
 }
 
 // Join View
-function JoinView({ pin, setPin, playerName, setPlayerName, setView, setPlayerData }) {
+function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
   const [error, setError] = useState('');
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -134,7 +84,6 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView, setPlayerDa
     // Subscribe to sessions
     return room.collection('session').subscribe(sessionsList => {
       setSessions(sessionsList);
-      console.log("Available sessions:", sessionsList);
     });
   }, []);
 
@@ -152,114 +101,48 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView, setPlayerDa
       localStorage.setItem('playerName', playerName);
       localStorage.setItem('lastPin', pin);
       
-      // Ensure PIN is a string
-      const pinString = pin.toString();
-      console.log(`Attempting to join session with PIN: "${pinString}"`);
-      
-      // Check if session exists with retry logic
-      let sessions = [];
-      const MAX_RETRIES = 3;
-      let retryCount = 0;
-      
-      while (retryCount < MAX_RETRIES && sessions.length === 0) {
-        console.log(`Searching for session with PIN "${pinString}" (attempt ${retryCount + 1})`);
-        sessions = await room.collection('session').filter({ pin: pinString }).getList();
-        
-        if (sessions.length === 0) {
-          console.log(`No session found with PIN "${pinString}" on attempt ${retryCount + 1}`);
-          retryCount++;
-          if (retryCount < MAX_RETRIES) {
-            // Wait before retry with exponential backoff
-            await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, retryCount)));
-          }
-        }
-      }
-      
+      // Check if session exists
+      const sessions = await room.collection('session').filter({ pin }).getList();
       if (sessions.length === 0) {
-        console.error(`Invalid PIN. Session not found after ${MAX_RETRIES} attempts.`);
-        setError(`Invalid PIN. Session not found. (PIN: ${pinString})`);
+        setError('Invalid PIN');
         setLoading(false);
         return;
       }
-      
-      console.log("Session found:", sessions[0]);
 
       // Check if player limit reached
-      const players = await room.collection('player').filter({ session_pin: pinString }).getList();
+      const players = await room.collection('player').filter({ session_pin: pin }).getList();
       if (players.length >= 10) {
         setError('Session is full (max 10 players)');
         setLoading(false);
         return;
       }
 
-      // Look for existing player with this name in this session
-      const existingPlayer = players.find(p => p.name === playerName && p.session_pin === pinString);
-      let playerRecord = null;
-      
+      // Check if player already exists with this name
+      const existingPlayer = players.find(p => p.name === playerName && p.session_pin === pin);
       if (existingPlayer) {
-        // Use existing player record
-        console.log('Using existing player record:', existingPlayer);
-        playerRecord = existingPlayer;
+        // If player exists, use that player
+        console.log('Player already exists, using existing player');
       } else {
-        // Create new player - with retry logic
-        console.log('Creating new player record');
-        const MAX_RETRIES = 3;
-        let retryCount = 0;
-        let success = false;
-        
-        while (retryCount < MAX_RETRIES && !success) {
-          try {
-            playerRecord = await room.collection('player').create({
-              session_pin: pinString,
-              name: playerName,
-              current_card: null,
-              expires_at: null,
-            });
-            success = true;
-            console.log('Created new player:', playerRecord);
-          } catch (err) {
-            console.error(`Player creation attempt ${retryCount + 1} failed:`, err);
-            retryCount++;
-            
-            // Wait before retry with exponential backoff
-            if (retryCount < MAX_RETRIES) {
-              await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, retryCount)));
-              
-              // Check if player was actually created despite the error
-              const refreshedPlayers = await room.collection('player').filter({ 
-                session_pin: pinString, 
-                name: playerName 
-              }).getList();
-              
-              const refreshedPlayer = refreshedPlayers.find(p => p.name === playerName);
-              if (refreshedPlayer) {
-                console.log('Player was actually created:', refreshedPlayer);
-                playerRecord = refreshedPlayer;
-                success = true;
-                break;
-              }
-            }
-          }
-        }
-        
-        if (!success) {
-          setError('Failed to join session after multiple attempts. Please try again.');
-          setLoading(false);
-          return;
+        // Join session - create new player
+        try {
+          const newPlayer = await room.collection('player').create({
+            session_pin: pin,
+            name: playerName,
+            current_card: null,
+            expires_at: null,
+          });
+          console.log('Created new player:', newPlayer);
+        } catch (playerErr) {
+          console.error('Failed to create player:', playerErr);
+          // Continue anyway - the PlayerView will retry
         }
       }
-      
-      // Store player data for use in PlayerView
-      setPlayerData(playerRecord);
-      
+
       // Create shareable link
-      const shareableUrl = `${window.baseUrl}?pin=${pinString}`;
-      try {
-        await navigator.clipboard.writeText(shareableUrl);
-        console.log('Shareable link copied to clipboard');
-      } catch (clipErr) {
-        console.error('Could not copy link: ', clipErr);
-      }
+      const shareableUrl = `${window.baseUrl}?pin=${pin}`;
+      navigator.clipboard.writeText(shareableUrl)
+        .then(() => console.log('Shareable link copied to clipboard'))
+        .catch(err => console.error('Could not copy link: ', err));
 
       setLoading(false);
       setView('player');
@@ -326,11 +209,9 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     if (!sessionData) {
       const generatedPin = Math.floor(1000 + Math.random() * 9000).toString();
       setPin(generatedPin);
-      console.log(`Generated PIN for conductor: "${generatedPin}"`);
 
       const createSession = async () => {
         try {
-          console.log(`Creating session with PIN: "${generatedPin}"`);
           const newSession = await room.collection('session').create({
             pin: generatedPin,
             mode: mode,
@@ -339,19 +220,15 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             is_playing: false,
             is_ending: false,
           });
-          console.log("Session created successfully:", newSession);
           setSessionData(newSession);
         } catch (err) {
           console.error('Failed to create session:', err);
-          // Try again if failed
-          setTimeout(createSession, 1000);
         }
       };
 
       createSession();
     } else {
       // If we already have session data, use it
-      console.log("Using existing session data:", sessionData);
       setPin(sessionData.pin);
       setMode(sessionData.mode);
       setMinTime(sessionData.min_time);
@@ -914,207 +791,138 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 }
 
 // Player View
-function PlayerView({ pin, playerName, setView, playerData }) {
+function PlayerView({ pin, playerName, setView }) {
   const [currentCard, setCurrentCard] = useState(null);
   const [timeLeft, setTimeLeft] = useState(0);
   const [totalTime, setTotalTime] = useState(0);
   const [error, setError] = useState('');
-  const [playerId, setPlayerId] = useState(playerData?.id || null);
+  const [playerId, setPlayerId] = useState(null);
   const [isSessionActive, setIsSessionActive] = useState(true);
-  const [loading, setLoading] = useState(!playerData);
+  const [loading, setLoading] = useState(true);
 
   // Find player record and subscribe to changes
   useEffect(() => {
     const setupPlayer = async () => {
       try {
         setLoading(true);
-        console.log('Setting up player view with pin:', pin, 'and name:', playerName);
-        console.log('Initial player data:', playerData);
+        console.log('Looking for player with pin:', pin, 'and name:', playerName);
 
-        // Ensure PIN is a string
-        const pinString = pin.toString();
-
-        // Check if session exists first with retry
-        let sessions = [];
-        const MAX_RETRIES = 3;
-        let retryCount = 0;
-        
-        while (retryCount < MAX_RETRIES && sessions.length === 0) {
-          console.log(`Looking for session with PIN "${pinString}" (attempt ${retryCount + 1})`);
-          sessions = await room.collection('session').filter({ pin: pinString }).getList();
-          
-          if (sessions.length === 0) {
-            console.log(`No session found on attempt ${retryCount + 1}, retrying...`);
-            retryCount++;
-            if (retryCount < MAX_RETRIES) {
-              await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, retryCount)));
-            }
-          }
-        }
-        
+        // Make sure session exists first
+        const sessions = await room.collection('session').filter({ pin }).getList();
         if (sessions.length === 0) {
-          setError(`Session not found. Please check your PIN (${pinString}).`);
+          setError('Session not found. Please check your PIN.');
           setLoading(false);
           return;
         }
 
-        console.log("Found session:", sessions[0]);
+        // First try to find the existing player
+        let players = await room.collection('player').filter({ 
+          session_pin: pin, 
+          name: playerName 
+        }).getList();
 
-        // Set session active state
-        setIsSessionActive(sessions[0].is_playing);
+        console.log('Found players:', players);
 
-        // If we already have player data, use it
-        if (playerData && playerData.id) {
-          console.log('Using provided player data:', playerData);
-          setPlayerId(playerData.id);
-          setCurrentCard(playerData.current_card);
+        // If no players found, create one with retries
+        if (players.length === 0) {
+          console.log('Player not found, attempting to create...');
           
-          if (playerData.expires_at) {
-            updateTimeLeft(playerData.expires_at, sessions[0]);
-          }
+          // Try to create the player with retries
+          const MAX_RETRIES = 3;
+          let retryCount = 0;
+          let playerCreated = false;
           
-          setLoading(false);
-        } else {
-          // Try to find player record
-          console.log('Looking for player with pin:', pinString, 'and name:', playerName);
-          let players = await room.collection('player').filter({ 
-            session_pin: pinString, 
-            name: playerName 
-          }).getList();
-
-          console.log('Found players:', players);
-
-          // If player exists, use it
-          if (players.length > 0) {
-            const player = players[0];
-            console.log('Found player record:', player);
-            setPlayerId(player.id);
-            setCurrentCard(player.current_card);
-            
-            if (player.expires_at) {
-              updateTimeLeft(player.expires_at, sessions[0]);
-            }
-            
-            setLoading(false);
-          } else {
-            // No player found, create one with retries
-            console.log('Player not found, creating new player...');
-            const MAX_RETRIES = 3;
-            let retryCount = 0;
-            let playerCreated = false;
-            
-            while (retryCount < MAX_RETRIES && !playerCreated) {
-              try {
-                const newPlayer = await room.collection('player').create({
-                  session_pin: pinString,
-                  name: playerName,
-                  current_card: null,
-                  expires_at: null,
-                });
-                console.log('Created new player in PlayerView:', newPlayer);
-                setPlayerId(newPlayer.id);
+          while (retryCount < MAX_RETRIES && !playerCreated) {
+            try {
+              const newPlayer = await room.collection('player').create({
+                session_pin: pin,
+                name: playerName,
+                current_card: null,
+                expires_at: null,
+              });
+              console.log('Created new player:', newPlayer);
+              setPlayerId(newPlayer.id);
+              playerCreated = true;
+            } catch (createErr) {
+              console.error(`Failed to create player (attempt ${retryCount + 1}):`, createErr);
+              retryCount++;
+              
+              // Wait a bit before retrying
+              await new Promise(resolve => setTimeout(resolve, 500 * retryCount));
+              
+              // Check if player was actually created
+              players = await room.collection('player').filter({ 
+                session_pin: pin, 
+                name: playerName 
+              }).getList();
+              
+              if (players.length > 0) {
+                console.log('Player was created despite error');
+                setPlayerId(players[0].id);
                 playerCreated = true;
-              } catch (createErr) {
-                console.error(`Failed to create player (attempt ${retryCount + 1}):`, createErr);
-                retryCount++;
-                
-                // Wait before retry with exponential backoff
-                await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, retryCount)));
-                
-                // Check if player was created despite error
-                players = await room.collection('player').filter({ 
-                  session_pin: pinString, 
-                  name: playerName 
-                }).getList();
-                
-                if (players.length > 0) {
-                  console.log('Player was created despite error:', players[0]);
-                  setPlayerId(players[0].id);
-                  playerCreated = true;
-                  break;
-                }
+                break;
               }
             }
-            
-            if (!playerCreated) {
-              setError('Could not join session after multiple attempts. Please try again.');
-              setLoading(false);
-              return;
-            }
-            
-            setLoading(false);
           }
+          
+          if (!playerCreated) {
+            setError('Could not join session after multiple attempts. Please try again.');
+            setLoading(false);
+            return;
+          }
+        } else {
+          setPlayerId(players[0].id);
         }
+
+        setLoading(false);
+
+        // Subscribe to player changes
+        return room.collection('player').filter({ 
+          session_pin: pin, 
+          name: playerName 
+        }).subscribe(playersList => {
+          if (playersList.length > 0) {
+            const player = playersList[0];
+            setCurrentCard(player.current_card);
+
+            if (player.expires_at) {
+              const expiry = new Date(player.expires_at).getTime();
+              const now = Date.now();
+              const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
+
+              // Calculate total time from session
+              const sessions = room.collection('session').filter({ pin }).getList();
+              if (sessions && sessions.length > 0) {
+                const session = sessions[0];
+                const maxDuration = session.max_time;
+                const minDuration = session.min_time;
+                const avgDuration = (maxDuration + minDuration) / 2;
+                setTotalTime(avgDuration);
+              }
+
+              setTimeLeft(remaining);
+            }
+          }
+        });
       } catch (err) {
         console.error('Failed to setup player:', err);
-        setError(`Failed to connect to session: ${err.message}`);
+        setError('Failed to connect to session');
         setLoading(false);
       }
     };
 
     setupPlayer();
-  }, [pin, playerName, playerData]);
-
-  const updateTimeLeft = (expiresAt, session) => {
-    if (!expiresAt) return;
-    
-    const expiry = new Date(expiresAt).getTime();
-    const now = Date.now();
-    const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
-    setTimeLeft(remaining);
-    
-    // Calculate total time from session
-    if (session) {
-      const maxDuration = session.max_time;
-      const minDuration = session.min_time;
-      const avgDuration = (maxDuration + minDuration) / 2;
-      setTotalTime(avgDuration);
-    }
-  };
-
-  // Subscribe to player changes
-  useEffect(() => {
-    if (pin && playerName) {
-      const pinString = pin.toString();
-      return room.collection('player').filter({ 
-        session_pin: pinString, 
-        name: playerName 
-      }).subscribe(playersList => {
-        if (playersList.length > 0) {
-          const player = playersList[0];
-          console.log('Player updated:', player);
-          setCurrentCard(player.current_card);
-          
-          if (player.expires_at) {
-            // Get session for timing info
-            const sessions = room.collection('session').filter({ pin: pinString }).getList();
-            if (sessions && sessions.length > 0) {
-              updateTimeLeft(player.expires_at, sessions[0]);
-            } else {
-              // Fallback if we can't get session
-              const expiry = new Date(player.expires_at).getTime();
-              const now = Date.now();
-              const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
-              setTimeLeft(remaining);
-            }
-          }
-        }
-      });
-    }
   }, [pin, playerName]);
 
   // Subscribe to session
   useEffect(() => {
-    if (pin) {
-      const pinString = pin.toString();
-      return room.collection('session').filter({ pin: pinString }).subscribe(sessionsList => {
-        if (sessionsList.length > 0) {
-          setIsSessionActive(sessionsList[0].is_playing);
-        } else {
-          setError('Session not found');
-        }
-      });
-    }
+    return room.collection('session').filter({ pin }).subscribe(sessionsList => {
+      if (sessionsList.length > 0) {
+        setIsSessionActive(sessionsList[0].is_playing);
+      } else {
+        setError('Session not found');
+      }
+    });
   }, [pin]);
 
   // Timer to update time left
