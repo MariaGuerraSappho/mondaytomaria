@@ -1,8 +1,34 @@
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
 
-// Initialize WebsimSocket
-const room = new WebsimSocket();
+// Initialize WebsimSocket with error handling
+let room;
+try {
+  room = new WebsimSocket();
+  console.log("WebsimSocket initialized successfully");
+} catch (err) {
+  console.error("Error initializing WebsimSocket:", err);
+  // We have a fallback implementation in the HTML
+  room = new WebsimSocket();
+}
+
+// Utility function to safely perform room operations with retry
+const safeRoomOperation = async (operation, maxRetries = 3) => {
+  let retries = 0;
+  while (retries < maxRetries) {
+    try {
+      return await operation();
+    } catch (err) {
+      console.error(`Operation failed (attempt ${retries + 1}):`, err);
+      retries++;
+      if (retries >= maxRetries) {
+        throw err;
+      }
+      // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, 500 * retries));
+    }
+  }
+};
 
 // Main App Component
 function App() {
@@ -10,30 +36,62 @@ function App() {
   const [pin, setPin] = useState('');
   const [playerName, setPlayerName] = useState('');
   const [sessionData, setSessionData] = useState(null);
+  const [initError, setInitError] = useState(null);
+
+  // Handle initialization errors
+  useEffect(() => {
+    // Hide loading indicator once React is mounted
+    const loadingElement = document.getElementById('loading');
+    if (loadingElement) {
+      loadingElement.style.display = 'none';
+    }
+    
+    if (!room) {
+      setInitError("Could not initialize real-time connection. Please refresh the page.");
+    }
+  }, []);
 
   // Check URL params to see if we should join a session directly
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const pinParam = params.get('pin');
-    if (pinParam) {
-      setPin(pinParam);
-      // Store the PIN in localStorage for persistence
-      localStorage.setItem('lastPin', pinParam);
-      setView('join');
-    } else {
-      // Check if we have a PIN stored
-      const storedPin = localStorage.getItem('lastPin');
-      if (storedPin) {
-        setPin(storedPin);
-      }
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const pinParam = params.get('pin');
+      if (pinParam) {
+        setPin(pinParam);
+        // Store the PIN in localStorage for persistence
+        localStorage.setItem('lastPin', pinParam);
+        setView('join');
+      } else {
+        // Check if we have a PIN stored
+        const storedPin = localStorage.getItem('lastPin');
+        if (storedPin) {
+          setPin(storedPin);
+        }
 
-      // Check if we have a stored name
-      const storedName = localStorage.getItem('playerName');
-      if (storedName) {
-        setPlayerName(storedName);
+        // Check if we have a stored name
+        const storedName = localStorage.getItem('playerName');
+        if (storedName) {
+          setPlayerName(storedName);
+        }
       }
+    } catch (error) {
+      console.error("Error processing URL parameters:", error);
     }
   }, []);
+
+  if (initError) {
+    return (
+      <div className="container">
+        <div className="card">
+          <h2 className="header">Error</h2>
+          <p>{initError}</p>
+          <button className="btn btn-primary" onClick={() => window.location.reload()}>
+            Reload Page
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const renderView = () => {
     switch (view) {
@@ -82,9 +140,14 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
 
   useEffect(() => {
     // Subscribe to sessions
-    return room.collection('session').subscribe(sessionsList => {
-      setSessions(sessionsList);
-    });
+    try {
+      return room.collection('session').subscribe(sessionsList => {
+        setSessions(sessionsList);
+      });
+    } catch (err) {
+      console.error("Error subscribing to sessions:", err);
+      setError("Could not connect to session data. Please refresh and try again.");
+    }
   }, []);
 
   const handleJoin = async () => {
@@ -102,15 +165,21 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
       localStorage.setItem('lastPin', pin);
       
       // Check if session exists
-      const sessions = await room.collection('session').filter({ pin }).getList();
-      if (sessions.length === 0) {
+      const sessions = await safeRoomOperation(() => 
+        room.collection('session').filter({ pin }).getList()
+      );
+      
+      if (!sessions || sessions.length === 0) {
         setError('Invalid PIN');
         setLoading(false);
         return;
       }
 
       // Check if player limit reached
-      const players = await room.collection('player').filter({ session_pin: pin }).getList();
+      const players = await safeRoomOperation(() => 
+        room.collection('player').filter({ session_pin: pin }).getList()
+      );
+      
       if (players.length >= 10) {
         setError('Session is full (max 10 players)');
         setLoading(false);
@@ -119,19 +188,17 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
 
       // Check if player already exists with this name
       const existingPlayer = players.find(p => p.name === playerName && p.session_pin === pin);
-      if (existingPlayer) {
-        // If player exists, use that player
-        console.log('Player already exists, using existing player');
-      } else {
+      if (!existingPlayer) {
         // Join session - create new player
         try {
-          const newPlayer = await room.collection('player').create({
-            session_pin: pin,
-            name: playerName,
-            current_card: null,
-            expires_at: null,
-          });
-          console.log('Created new player:', newPlayer);
+          await safeRoomOperation(() => 
+            room.collection('player').create({
+              session_pin: pin,
+              name: playerName,
+              current_card: null,
+              expires_at: null,
+            })
+          );
         } catch (playerErr) {
           console.error('Failed to create player:', playerErr);
           // Continue anyway - the PlayerView will retry
@@ -139,16 +206,20 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
       }
 
       // Create shareable link
-      const shareableUrl = `${window.baseUrl}?pin=${pin}`;
-      navigator.clipboard.writeText(shareableUrl)
-        .then(() => console.log('Shareable link copied to clipboard'))
-        .catch(err => console.error('Could not copy link: ', err));
+      const shareableUrl = `${window.location.origin}${window.location.pathname}?pin=${pin}`;
+      try {
+        navigator.clipboard.writeText(shareableUrl)
+          .then(() => console.log('Shareable link copied to clipboard'))
+          .catch(err => console.error('Could not copy link: ', err));
+      } catch (clipboardErr) {
+        console.error("Error accessing clipboard:", clipboardErr);
+      }
 
       setLoading(false);
       setView('player');
     } catch (err) {
       console.error('Failed to join session:', err);
-      setError(`Failed to join session: ${err.message}`);
+      setError(`Failed to join session: ${err.message || 'Unknown error'}`);
       setLoading(false);
     }
   };
@@ -203,6 +274,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   const [textInput, setTextInput] = useState('');
   const [deckName, setDeckName] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   // Generate PIN and create session on component mount
   useEffect(() => {
@@ -212,17 +284,20 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 
       const createSession = async () => {
         try {
-          const newSession = await room.collection('session').create({
-            pin: generatedPin,
-            mode: mode,
-            min_time: minTime,
-            max_time: maxTime,
-            is_playing: false,
-            is_ending: false,
-          });
+          const newSession = await safeRoomOperation(() =>
+            room.collection('session').create({
+              pin: generatedPin,
+              mode: mode,
+              min_time: minTime,
+              max_time: maxTime,
+              is_playing: false,
+              is_ending: false,
+            })
+          );
           setSessionData(newSession);
         } catch (err) {
           console.error('Failed to create session:', err);
+          setError('Failed to create session. Please try again.');
         }
       };
 
@@ -241,7 +316,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   // Create shareable link when PIN is set
   useEffect(() => {
     if (pin) {
-      const shareableUrl = `${window.baseUrl}?pin=${pin}`;
+      const shareableUrl = `${window.location.origin}${window.location.pathname}?pin=${pin}`;
       console.log('Shareable link:', shareableUrl);
     }
   }, [pin]);
@@ -249,21 +324,29 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   // Subscribe to players in this session
   useEffect(() => {
     if (pin) {
-      return room.collection('player').filter({ session_pin: pin }).subscribe(playersList => {
-        setPlayers(playersList);
-      });
+      try {
+        return room.collection('player').filter({ session_pin: pin }).subscribe(playersList => {
+          setPlayers(playersList);
+        });
+      } catch (err) {
+        console.error("Error subscribing to players:", err);
+      }
     }
   }, [pin]);
 
   // Subscribe to decks in this session
   useEffect(() => {
     if (pin) {
-      return room.collection('deck').filter({ session_pin: pin }).subscribe(decksList => {
-        setDecks(decksList);
-        if (decksList.length > 0 && !currentDeck) {
-          setCurrentDeck(decksList[0].id);
-        }
-      });
+      try {
+        return room.collection('deck').filter({ session_pin: pin }).subscribe(decksList => {
+          setDecks(decksList);
+          if (decksList.length > 0 && !currentDeck) {
+            setCurrentDeck(decksList[0].id);
+          }
+        });
+      } catch (err) {
+        console.error("Error subscribing to decks:", err);
+      }
     }
   }, [pin]);
 
@@ -272,13 +355,15 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     const updateSession = async () => {
       if (sessionData && sessionData.id && pin) {
         try {
-          await room.collection('session').update(sessionData.id, {
-            mode,
-            min_time: minTime,
-            max_time: maxTime,
-            is_playing: isPlaying,
-            is_ending: isEnding,
-          });
+          await safeRoomOperation(() =>
+            room.collection('session').update(sessionData.id, {
+              mode,
+              min_time: minTime,
+              max_time: maxTime,
+              is_playing: isPlaying,
+              is_ending: isEnding,
+            })
+          );
         } catch (err) {
           console.error('Failed to update session:', err);
         }
@@ -313,10 +398,12 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     if (isEnding) {
       // If ending, don't assign new cards
       try {
-        await room.collection('player').update(player.id, {
-          current_card: 'END',
-          expires_at: null,
-        });
+        await safeRoomOperation(() =>
+          room.collection('player').update(player.id, {
+            current_card: 'END',
+            expires_at: null,
+          })
+        );
       } catch (err) {
         console.error('Failed to update player:', err);
       }
@@ -383,10 +470,12 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 
     // Update player
     try {
-      await room.collection('player').update(player.id, {
-        current_card: card,
-        expires_at: expiresAt,
-      });
+      await safeRoomOperation(() =>
+        room.collection('player').update(player.id, {
+          current_card: card,
+          expires_at: expiresAt,
+        })
+      );
     } catch (err) {
       console.error('Failed to update player:', err);
     }
@@ -412,10 +501,12 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     // Reset all players' cards
     players.forEach(async player => {
       try {
-        await room.collection('player').update(player.id, {
-          current_card: null,
-          expires_at: null,
-        });
+        await safeRoomOperation(() =>
+          room.collection('player').update(player.id, {
+            current_card: null,
+            expires_at: null,
+          })
+        );
       } catch (err) {
         console.error('Failed to update player:', err);
       }
@@ -427,11 +518,12 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     if (!file) return;
 
     setLoading(true);
+    setError(null);
 
     // Add a size limit to prevent timeouts
-    const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+    const MAX_FILE_SIZE = 1 * 1024 * 1024; // 1MB to be safer
     if (file.size > MAX_FILE_SIZE) {
-      alert('File is too large (max 5MB). Please split into smaller files.');
+      alert('File is too large (max 1MB). Please split into smaller files.');
       setLoading(false);
       setFileInput('');
       return;
@@ -446,7 +538,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         const processDecksWithDelay = async (items, processFn) => {
           const results = [];
           // Process in smaller batches
-          const BATCH_SIZE = 5;
+          const BATCH_SIZE = 1; // Process one at a time to avoid timeouts
           
           for (let i = 0; i < items.length; i += BATCH_SIZE) {
             const batch = items.slice(i, i + BATCH_SIZE);
@@ -460,12 +552,13 @@ function ConductorView({ setView, sessionData, setSessionData }) {
                 results.push(result.value);
               } else {
                 console.error(`Failed to process item ${i + index}:`, result.reason);
+                setError(`Failed to process deck ${i + index + 1}. Try a smaller file.`);
               }
             });
             
             // Add a small delay between batches to prevent timeout
             if (i + BATCH_SIZE < items.length) {
-              await new Promise(resolve => setTimeout(resolve, 300));
+              await new Promise(resolve => setTimeout(resolve, 500));
             }
           }
           return results;
@@ -485,18 +578,18 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             }
           });
         } else {
-          alert('Invalid JSON format. Expected an array of strings or object with cards array.');
+          setError('Invalid JSON format. Expected an array of strings or object with cards array.');
         }
         
         setLoading(false);
       } catch (err) {
-        alert('Failed to parse JSON: ' + err.message);
+        setError('Failed to parse JSON: ' + (err.message || 'Unknown error'));
         setLoading(false);
       }
     };
     
     reader.onerror = function() {
-      alert('Error reading file');
+      setError('Error reading file');
       setLoading(false);
     };
     
@@ -519,7 +612,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       });
 
       // Split large decks into chunks to prevent timeouts
-      const MAX_CARDS_PER_DECK = 100;
+      const MAX_CARDS_PER_DECK = 50; // Smaller limit for better reliability
       if (processedCards.length > MAX_CARDS_PER_DECK) {
         const chunks = [];
         for (let i = 0; i < processedCards.length; i += MAX_CARDS_PER_DECK) {
@@ -533,7 +626,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           
           // Add a small delay between chunks
           if (i < chunks.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 300));
+            await new Promise(resolve => setTimeout(resolve, 500));
           }
         }
         
@@ -543,7 +636,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       }
     } catch (err) {
       console.error('Failed to create deck:', err);
-      alert('Failed to create deck: ' + err.message);
+      setError('Failed to create deck: ' + (err.message || 'Unknown error'));
       throw err;
     }
   };
@@ -551,12 +644,14 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   // Helper function to create a single deck
   const createDeckChunk = async (name, cards) => {
     try {
-      const newDeck = await room.collection('deck').create({
-        session_pin: pin,
-        name: name,
-        cards: cards,
-        created_at: new Date().toISOString()
-      });
+      const newDeck = await safeRoomOperation(() =>
+        room.collection('deck').create({
+          session_pin: pin,
+          name: name,
+          cards: cards,
+          created_at: new Date().toISOString()
+        })
+      );
 
       console.log('Created new deck:', newDeck);
 
@@ -585,9 +680,14 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     }
 
     setLoading(true);
-    await createDeck(deckName, cards);
-    setTextInput('');
-    setDeckName('');
+    setError(null);
+    try {
+      await createDeck(deckName, cards);
+      setTextInput('');
+      setDeckName('');
+    } catch (err) {
+      setError('Failed to add deck: ' + (err.message || 'Unknown error'));
+    }
     setLoading(false);
   };
 
@@ -626,9 +726,13 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         <h2 className="header">Session PIN: {pin}</h2>
         <p>Share this PIN with players to join (max 10)</p>
         <button className="btn" onClick={() => {
-          const url = `${window.baseUrl}?pin=${pin}`;
-          navigator.clipboard.writeText(url);
-          alert('Shareable link copied to clipboard');
+          const url = `${window.location.origin}${window.location.pathname}?pin=${pin}`;
+          try {
+            navigator.clipboard.writeText(url);
+            alert('Shareable link copied to clipboard');
+          } catch (err) {
+            alert('Could not copy link. Please manually share this PIN: ' + pin);
+          }
         }}>
           Copy Shareable Link
         </button>
@@ -675,6 +779,8 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             {loading ? 'Adding...' : 'Add Deck'}
           </button>
         </div>
+
+        {error && <p style={{ color: 'red', marginBottom: '10px' }}>{error}</p>}
 
         <div>
           <h3>Available Decks ({decks.length})</h3>
@@ -808,65 +914,65 @@ function PlayerView({ pin, playerName, setView }) {
         console.log('Looking for player with pin:', pin, 'and name:', playerName);
 
         // Make sure session exists first
-        const sessions = await room.collection('session').filter({ pin }).getList();
-        if (sessions.length === 0) {
+        const sessions = await safeRoomOperation(() => 
+          room.collection('session').filter({ pin }).getList()
+        );
+        
+        if (!sessions || sessions.length === 0) {
           setError('Session not found. Please check your PIN.');
           setLoading(false);
           return;
         }
 
         // First try to find the existing player
-        let players = await room.collection('player').filter({ 
-          session_pin: pin, 
-          name: playerName 
-        }).getList();
+        let players = await safeRoomOperation(() => 
+          room.collection('player').filter({ 
+            session_pin: pin, 
+            name: playerName 
+          }).getList()
+        );
 
         console.log('Found players:', players);
 
         // If no players found, create one with retries
-        if (players.length === 0) {
+        if (!players || players.length === 0) {
           console.log('Player not found, attempting to create...');
           
           // Try to create the player with retries
-          const MAX_RETRIES = 3;
-          let retryCount = 0;
           let playerCreated = false;
           
-          while (retryCount < MAX_RETRIES && !playerCreated) {
-            try {
-              const newPlayer = await room.collection('player').create({
+          try {
+            const newPlayer = await safeRoomOperation(() => 
+              room.collection('player').create({
                 session_pin: pin,
                 name: playerName,
                 current_card: null,
                 expires_at: null,
-              });
-              console.log('Created new player:', newPlayer);
-              setPlayerId(newPlayer.id);
-              playerCreated = true;
-            } catch (createErr) {
-              console.error(`Failed to create player (attempt ${retryCount + 1}):`, createErr);
-              retryCount++;
-              
-              // Wait a bit before retrying
-              await new Promise(resolve => setTimeout(resolve, 500 * retryCount));
-              
-              // Check if player was actually created
-              players = await room.collection('player').filter({ 
+              })
+            );
+            console.log('Created new player:', newPlayer);
+            setPlayerId(newPlayer.id);
+            playerCreated = true;
+          } catch (createErr) {
+            console.error(`Failed to create player:`, createErr);
+            
+            // Check if player was actually created despite the error
+            players = await safeRoomOperation(() => 
+              room.collection('player').filter({ 
                 session_pin: pin, 
                 name: playerName 
-              }).getList();
-              
-              if (players.length > 0) {
-                console.log('Player was created despite error');
-                setPlayerId(players[0].id);
-                playerCreated = true;
-                break;
-              }
+              }).getList()
+            );
+            
+            if (players && players.length > 0) {
+              console.log('Player was created despite error');
+              setPlayerId(players[0].id);
+              playerCreated = true;
             }
           }
           
           if (!playerCreated) {
-            setError('Could not join session after multiple attempts. Please try again.');
+            setError('Could not join session. Please try again with a different name.');
             setLoading(false);
             return;
           }
@@ -877,36 +983,41 @@ function PlayerView({ pin, playerName, setView }) {
         setLoading(false);
 
         // Subscribe to player changes
-        return room.collection('player').filter({ 
-          session_pin: pin, 
-          name: playerName 
-        }).subscribe(playersList => {
-          if (playersList.length > 0) {
-            const player = playersList[0];
-            setCurrentCard(player.current_card);
+        try {
+          return room.collection('player').filter({ 
+            session_pin: pin, 
+            name: playerName 
+          }).subscribe(playersList => {
+            if (playersList && playersList.length > 0) {
+              const player = playersList[0];
+              setCurrentCard(player.current_card);
 
-            if (player.expires_at) {
-              const expiry = new Date(player.expires_at).getTime();
-              const now = Date.now();
-              const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
+              if (player.expires_at) {
+                const expiry = new Date(player.expires_at).getTime();
+                const now = Date.now();
+                const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
 
-              // Calculate total time from session
-              const sessions = room.collection('session').filter({ pin }).getList();
-              if (sessions && sessions.length > 0) {
-                const session = sessions[0];
-                const maxDuration = session.max_time;
-                const minDuration = session.min_time;
-                const avgDuration = (maxDuration + minDuration) / 2;
-                setTotalTime(avgDuration);
+                // Calculate total time from session
+                const sessions = room.collection('session').filter({ pin }).getList();
+                if (sessions && sessions.length > 0) {
+                  const session = sessions[0];
+                  const maxDuration = session.max_time;
+                  const minDuration = session.min_time;
+                  const avgDuration = (maxDuration + minDuration) / 2;
+                  setTotalTime(avgDuration);
+                }
+
+                setTimeLeft(remaining);
               }
-
-              setTimeLeft(remaining);
             }
-          }
-        });
+          });
+        } catch (subErr) {
+          console.error("Error subscribing to player updates:", subErr);
+          setError("Could not receive updates. Please refresh the page.");
+        }
       } catch (err) {
         console.error('Failed to setup player:', err);
-        setError('Failed to connect to session');
+        setError('Failed to connect to session. Please try again.');
         setLoading(false);
       }
     };
@@ -916,13 +1027,17 @@ function PlayerView({ pin, playerName, setView }) {
 
   // Subscribe to session
   useEffect(() => {
-    return room.collection('session').filter({ pin }).subscribe(sessionsList => {
-      if (sessionsList.length > 0) {
-        setIsSessionActive(sessionsList[0].is_playing);
-      } else {
-        setError('Session not found');
-      }
-    });
+    try {
+      return room.collection('session').filter({ pin }).subscribe(sessionsList => {
+        if (sessionsList && sessionsList.length > 0) {
+          setIsSessionActive(sessionsList[0].is_playing);
+        } else {
+          setError('Session not found');
+        }
+      });
+    } catch (err) {
+      console.error("Error subscribing to session:", err);
+    }
   }, [pin]);
 
   // Timer to update time left
@@ -1011,5 +1126,10 @@ function PlayerView({ pin, playerName, setView }) {
 }
 
 // Render the app
-const root = createRoot(document.getElementById('root'));
-root.render(<App />);
+try {
+  const root = createRoot(document.getElementById('root'));
+  root.render(<App />);
+} catch (err) {
+  console.error("Error rendering app:", err);
+  document.getElementById('loading').innerHTML = 'Error loading application: ' + (err.message || 'Unknown error');
+}

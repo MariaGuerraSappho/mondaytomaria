@@ -10,11 +10,24 @@
   padding: 0;
   box-sizing: border-box;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-tap-highlight-color: transparent;
 }
 
 body {
   background-color: var(--pink-bg);
   min-height: 100vh;
+  overflow-x: hidden;
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
+
+/* Improve mobile experience */
+html, body {
+  position: fixed;
+  overflow: hidden;
+  width: 100vw;
+  height: 100vh;
 }
 
 .container {
@@ -22,6 +35,9 @@ body {
   max-width: 1200px;
   margin: 0 auto;
   padding: 20px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  height: 100vh;
 }
 
 .card {
@@ -30,6 +46,7 @@ body {
   padding: 20px;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
   margin-bottom: 20px;
+  word-wrap: break-word;
 }
 
 .fullscreen-card {
@@ -54,6 +71,7 @@ body {
   font-size: 32px;
   font-weight: bold;
   color: var(--black);
+  word-wrap: break-word;
 }
 
 .btn {
@@ -65,11 +83,19 @@ body {
   font-weight: bold;
   cursor: pointer;
   transition: all 0.2s;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .btn:hover {
   background-color: var(--black);
   color: var(--white);
+}
+
+.btn:active {
+  transform: scale(0.98);
 }
 
 .btn-primary {
@@ -144,6 +170,7 @@ body {
 .player-list {
   max-height: 400px;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .player-item {
@@ -162,6 +189,19 @@ body {
 @media (max-width: 768px) {
   .card-text {
     font-size: 24px;
+  }
+  
+  .btn {
+    width: 100%;
+    margin-bottom: 10px;
+  }
+  
+  .header {
+    font-size: 20px;
+  }
+  
+  .flex {
+    flex-direction: column;
   }
 }
 

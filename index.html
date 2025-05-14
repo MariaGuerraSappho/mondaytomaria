@@ -1,14 +1,131 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Improv Card Distributor</title>
-  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- External dependencies -->
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+  <!-- Websim Socket (fallback included) -->
+  <script>
+    // Check if WebsimSocket is available, otherwise create a fallback
+    window.addEventListener('DOMContentLoaded', function() {
+      if (typeof WebsimSocket === 'undefined') {
+        console.warn('WebsimSocket not found, creating fallback implementation');
+        window.WebsimSocket = class WebsimSocketFallback {
+          constructor() {
+            console.log('Creating WebsimSocket fallback');
+            this._collections = {};
+          }
+          
+          collection(type) {
+            if (!this._collections[type]) {
+              this._collections[type] = {
+                filter: (params) => this._createFilteredCollection(type, params),
+                getList: () => localStorage.getItem(type) ? JSON.parse(localStorage.getItem(type)) : [],
+                create: async (data) => {
+                  const items = localStorage.getItem(type) ? JSON.parse(localStorage.getItem(type)) : [];
+                  const newItem = {
+                    ...data,
+                    id: Math.random().toString(36).substring(2, 15),
+                    username: 'local-user',
+                    created_at: new Date().toISOString()
+                  };
+                  items.push(newItem);
+                  localStorage.setItem(type, JSON.stringify(items));
+                  return newItem;
+                },
+                update: async (id, data) => {
+                  const items = localStorage.getItem(type) ? JSON.parse(localStorage.getItem(type)) : [];
+                  const index = items.findIndex(item => item.id === id);
+                  if (index !== -1) {
+                    items[index] = { ...items[index], ...data };
+                    localStorage.setItem(type, JSON.stringify(items));
+                    return items[index];
+                  }
+                  throw new Error('Item not found');
+                },
+                delete: async (id) => {
+                  const items = localStorage.getItem(type) ? JSON.parse(localStorage.getItem(type)) : [];
+                  const newItems = items.filter(item => item.id !== id);
+                  localStorage.setItem(type, JSON.stringify(newItems));
+                },
+                subscribe: (callback) => {
+                  callback(localStorage.getItem(type) ? JSON.parse(localStorage.getItem(type)) : []);
+                  return () => {}; // Unsubscribe function
+                }
+              };
+            }
+            return this._collections[type];
+          }
+          
+          _createFilteredCollection(type, filterParams) {
+            return {
+              getList: () => {
+                const items = localStorage.getItem(type) ? JSON.parse(localStorage.getItem(type)) : [];
+                return items.filter(item => {
+                  for (const key in filterParams) {
+                    if (item[key] !== filterParams[key]) return false;
+                  }
+                  return true;
+                });
+              },
+              subscribe: (callback) => {
+                callback(this._collections[type].filter(filterParams).getList());
+                return () => {}; // Unsubscribe function
+              }
+            };
+          }
+        }
+      }
+      
+      // Define window.baseUrl if it doesn't exist
+      if (typeof window.baseUrl === 'undefined') {
+        window.baseUrl = window.location.origin + window.location.pathname;
+      }
+      
+      // Define window.websim if it doesn't exist
+      if (typeof window.websim === 'undefined') {
+        window.websim = {
+          upload: async (file) => {
+            // Fallback for uploading files - returns a data URL
+            return new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsDataURL(file);
+            });
+          },
+          getCreatedBy: async () => {
+            return { username: 'user' };
+          }
+        };
+      }
+    });
+  </script>
   <link rel="stylesheet" href="styles.css">
+  <style>
+    /* Loading indicator */
+    #loading {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #ffd6ea;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999;
+      font-size: 24px;
+      font-weight: bold;
+    }
+  </style>
 </head>
 <body>
+  <!-- Loading indicator displayed until React mounts -->
+  <div id="loading">Loading Improv Card Distributor...</div>
   <div id="root"></div>
   <script type="text/babel" src="app.js"></script>
 </body>
