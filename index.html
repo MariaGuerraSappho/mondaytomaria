@@ -1,0 +1,51 @@
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Improv Card Distributor</title>
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+  <link rel="stylesheet" href="styles.css">
+  <!-- Fix previous JSX parse errors -->
+  <script>
+    window.baseUrl = window.location.origin + window.location.pathname;
+    console.log("Base URL for sharing:", window.baseUrl);
+    
+    // Define a fallback WebsimSocket if it's not available (when referrer is missing)
+    if (typeof WebsimSocket === 'undefined') {
+      console.log("WebsimSocket not detected, using fallback implementation");
+      window.WebsimSocket = class FallbackWebsimSocket {
+        constructor() {
+          this.isFallback = true;
+        }
+        
+        collection(type) {
+          return {
+            create: () => Promise.reject(new Error('Cannot create records outside Websim')),
+            update: () => Promise.reject(new Error('Cannot update records outside Websim')),
+            delete: () => Promise.reject(new Error('Cannot delete records outside Websim')),
+            filter: () => ({ 
+              getList: () => [], 
+              subscribe: (cb) => { cb([]); return () => {}; }
+            }),
+            getList: () => [],
+            subscribe: (cb) => { cb([]); return () => {}; }
+          };
+        }
+      };
+    }
+    
+    // Define fallback upload function
+    if (!window.websim || !window.websim.upload) {
+      window.websim = window.websim || {};
+      window.websim.upload = () => Promise.reject(new Error('File upload not available outside Websim'));
+      window.websim.getCreatedBy = () => Promise.resolve({ username: 'guest' });
+    }
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" src="app.js"></script>
+</body>
+</html>
