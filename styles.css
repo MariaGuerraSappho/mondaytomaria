@@ -38,6 +38,7 @@ html, body {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   height: 100vh;
+  position: relative;
 }
 
 .card {
@@ -186,6 +187,38 @@ html, body {
   margin-top: 5px;
 }
 
+.version-tag {
+  position: fixed;
+  bottom: 5px;
+  right: 5px;
+  font-size: 10px;
+  color: var(--gray);
+  opacity: 0.5;
+  z-index: 100;
+}
+
+.connection-status {
+  margin-top: 15px;
+  font-size: 14px;
+  color: var(--gray);
+}
+
+.version-display {
+  font-size: 16px;
+  font-weight: bold;
+  background-color: var(--black);
+  color: var(--white);
+  padding: 5px 10px;
+  border-radius: 12px;
+  margin-bottom: 15px;
+  text-align: center;
+}
+
+@keyframes progress-bar {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
 @media (max-width: 768px) {
   .card-text {
     font-size: 24px;
@@ -204,4 +237,3 @@ html, body {
     flex-direction: column;
   }
 }
-

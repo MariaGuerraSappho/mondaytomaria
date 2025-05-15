@@ -1,3 +1,6 @@
+// App Version for tracking
+const APP_VERSION = "1.3.0";
+
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
 
@@ -12,22 +15,45 @@ try {
   room = new WebsimSocket();
 }
 
-// Utility function to safely perform room operations with retry
-const safeRoomOperation = async (operation, maxRetries = 3) => {
+// Enhanced error handling and reporting
+const logError = (context, error) => {
+  const errorMessage = error?.message || String(error) || "Unknown error";
+  console.error(`[${APP_VERSION}] ${context}:`, error);
+  return errorMessage;
+};
+
+// Utility function to safely perform room operations with retry and improved error handling
+const safeRoomOperation = async (operation, maxRetries = 5) => {
   let retries = 0;
+  let lastError = null;
+  
   while (retries < maxRetries) {
     try {
       return await operation();
     } catch (err) {
-      console.error(`Operation failed (attempt ${retries + 1}):`, err);
+      lastError = err;
+      const errorMsg = logError(`Operation failed (attempt ${retries + 1})`, err);
+      
+      // Special handling for timeout errors
+      const isTimeout = errorMsg.includes('timeout') || errorMsg.includes('Timeout');
+      
       retries++;
       if (retries >= maxRetries) {
+        console.warn(`[${APP_VERSION}] All retries failed for operation`);
         throw err;
       }
-      // Wait before retrying
-      await new Promise(resolve => setTimeout(resolve, 500 * retries));
+      
+      // Exponential backoff with jitter
+      const baseDelay = isTimeout ? 800 : 500;
+      const jitter = Math.random() * 300;
+      const delay = (baseDelay * retries) + jitter;
+      
+      console.log(`[${APP_VERSION}] Retrying in ${Math.round(delay)}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
+  
+  throw lastError;
 };
 
 // Main App Component
@@ -37,6 +63,7 @@ function App() {
   const [playerName, setPlayerName] = useState('');
   const [sessionData, setSessionData] = useState(null);
   const [initError, setInitError] = useState(null);
+  const [appVersion] = useState(APP_VERSION);
 
   // Handle initialization errors
   useEffect(() => {
@@ -49,7 +76,9 @@ function App() {
     if (!room) {
       setInitError("Could not initialize real-time connection. Please refresh the page.");
     }
-  }, []);
+    
+    console.log(`[${APP_VERSION}] App initialized`);
+  }, [appVersion]);
 
   // Check URL params to see if we should join a session directly
   useEffect(() => {
@@ -75,7 +104,7 @@ function App() {
         }
       }
     } catch (error) {
-      console.error("Error processing URL parameters:", error);
+      logError("Error processing URL parameters", error);
     }
   }, []);
 
@@ -89,6 +118,7 @@ function App() {
             Reload Page
           </button>
         </div>
+        <div className="version-tag">v{appVersion}</div>
       </div>
     );
   }
@@ -111,6 +141,7 @@ function App() {
   return (
     <div className="container">
       {renderView()}
+      <div className="version-tag">v{appVersion}</div>
     </div>
   );
 }
@@ -120,6 +151,7 @@ function HomeView({ setView }) {
   return (
     <div className="flex flex-col items-center gap-4">
       <h1 className="header">Improv Card Distributor</h1>
+      <div className="version-display">Version {APP_VERSION}</div>
       <div className="card">
         <button className="btn btn-primary mb-4" onClick={() => setView('conductor')}>
           I'm the Conductor
@@ -145,7 +177,7 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
         setSessions(sessionsList);
       });
     } catch (err) {
-      console.error("Error subscribing to sessions:", err);
+      const errorMsg = logError("Error subscribing to sessions", err);
       setError("Could not connect to session data. Please refresh and try again.");
     }
   }, []);
@@ -200,7 +232,7 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
             })
           );
         } catch (playerErr) {
-          console.error('Failed to create player:', playerErr);
+          logError('Failed to create player', playerErr);
           // We'll proceed to player view anyway and retry there
         }
       }
@@ -208,8 +240,8 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
       setLoading(false);
       setView('player');
     } catch (err) {
-      console.error('Failed to join session:', err);
-      setError(`Failed to join session: ${err.message || 'Unknown error'}`);
+      const errorMsg = logError('Failed to join session', err);
+      setError(`Failed to join session: ${errorMsg}`);
       setLoading(false);
     }
   };
@@ -266,6 +298,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [deckCreationStatus, setDeckCreationStatus] = useState('');
 
   // Generate PIN and create session on component mount
   useEffect(() => {
@@ -286,9 +319,9 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             })
           );
           setSessionData(newSession);
-          console.log('Created session with PIN:', generatedPin);
+          console.log(`[${APP_VERSION}] Created session with PIN:`, generatedPin);
         } catch (err) {
-          console.error('Failed to create session:', err);
+          const errorMsg = logError('Failed to create session', err);
           setError('Failed to create session. Please try again.');
         }
       };
@@ -309,7 +342,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   useEffect(() => {
     if (pin) {
       const shareableUrl = `${window.baseUrl || window.location.origin + window.location.pathname}?pin=${pin}`;
-      console.log('Shareable link:', shareableUrl);
+      console.log(`[${APP_VERSION}] Shareable link:`, shareableUrl);
     }
   }, [pin]);
 
@@ -321,11 +354,11 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           return room.collection('player')
             .filter({ session_pin: pin })
             .subscribe(playersList => {
-              console.log('Players updated:', playersList);
+              console.log(`[${APP_VERSION}] Players updated:`, playersList?.length || 0);
               setPlayers(playersList || []);
             });
         } catch (err) {
-          console.error("Error subscribing to players:", err);
+          logError("Error subscribing to players", err);
           // Retry subscription after a delay
           setTimeout(subscribeToPlayers, 3000);
           return () => {}; // Return empty unsubscribe function
@@ -349,7 +382,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             setPlayers(latestPlayers);
           }
         } catch (err) {
-          console.error("Failed to refresh player list:", err);
+          logError("Failed to refresh player list", err);
         }
       }, 10000); // Refresh every 10 seconds
       
@@ -365,14 +398,14 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           return room.collection('deck')
             .filter({ session_pin: pin })
             .subscribe(decksList => {
-              console.log('Decks updated:', decksList);
+              console.log(`[${APP_VERSION}] Decks updated:`, decksList?.length || 0);
               setDecks(decksList || []);
               if (decksList && decksList.length > 0 && !currentDeck) {
                 setCurrentDeck(decksList[0].id);
               }
             });
         } catch (err) {
-          console.error("Error subscribing to decks:", err);
+          logError("Error subscribing to decks", err);
           // Retry subscription after a delay
           setTimeout(subscribeToDecks, 3000);
           return () => {}; // Return empty unsubscribe function
@@ -398,7 +431,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             })
           );
         } catch (err) {
-          console.error('Failed to update session:', err);
+          logError('Failed to update session', err);
         }
       }
     };
@@ -438,7 +471,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           })
         );
       } catch (err) {
-        console.error('Failed to update player:', err);
+        logError('Failed to update player', err);
       }
       return;
     }
@@ -510,7 +543,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         })
       );
     } catch (err) {
-      console.error('Failed to update player:', err);
+      logError('Failed to update player', err);
     }
   };
 
@@ -541,12 +574,12 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           })
         );
       } catch (err) {
-        console.error('Failed to update player:', err);
+        logError('Failed to update player', err);
       }
     });
   };
 
-  // FIXED: Improved file upload to handle larger files and prevent timeouts
+  // ENHANCED: Further improved file upload for server compatibility
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -554,91 +587,137 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     setLoading(true);
     setError(null);
     setUploadProgress(0);
+    setDeckCreationStatus('');
 
     // Add a size limit to prevent timeouts
-    const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB
+    const MAX_FILE_SIZE = 500 * 1024; // Reduced to 500KB for better server compatibility
     if (file.size > MAX_FILE_SIZE) {
-      alert('File is too large (max 2MB). Please split into smaller files.');
+      alert('File is too large (max 500KB). Please split into smaller files.');
       setLoading(false);
       setFileInput('');
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const data = JSON.parse(e.target.result);
+    // Use smaller file reader chunks for better reliability
+    const CHUNK_SIZE = 64 * 1024; // Reduced to 64KB chunks for better server compatibility
+    let offset = 0;
+    const fileSize = file.size;
+    let fileContent = '';
+    
+    const readNextChunk = () => {
+      const reader = new FileReader();
+      const blob = file.slice(offset, Math.min(offset + CHUNK_SIZE, fileSize));
+      
+      reader.onload = (e) => {
+        fileContent += e.target.result;
+        offset += CHUNK_SIZE;
         
-        // Function to process decks with a delay to prevent timeouts
+        // Update progress
+        const progress = Math.min(100, Math.round((offset / fileSize) * 100));
+        setUploadProgress(progress);
+        setDeckCreationStatus(`Reading file: ${progress}%`);
+        
+        if (offset < fileSize) {
+          // Read next chunk
+          readNextChunk();
+        } else {
+          // File completely read
+          processFileContent(fileContent);
+        }
+      };
+      
+      reader.onerror = function(err) {
+        const errorMsg = logError('Error reading file chunk', err);
+        setError('Error reading file: ' + errorMsg);
+        setLoading(false);
+        setUploadProgress(0);
+      };
+      
+      reader.readAsText(blob);
+    };
+    
+    const processFileContent = async (content) => {
+      try {
+        setDeckCreationStatus('Parsing JSON...');
+        // Use try-catch for JSON parsing to avoid crashing
+        let data;
+        try {
+          data = JSON.parse(content);
+        } catch (jsonErr) {
+          throw new Error('Failed to parse JSON: ' + jsonErr.message);
+        }
+        
+        // Function to process decks with increased reliability
         const processDecksWithDelay = async (items) => {
           const totalItems = items.length;
           const results = [];
           
-          // Process in smaller batches
-          const BATCH_SIZE = 1; // Process one at a time for reliability
-          
-          for (let i = 0; i < items.length; i += BATCH_SIZE) {
-            const batch = items.slice(i, i + BATCH_SIZE);
-            
+          // Process one deck at a time with longer delays for server compatibility
+          for (let i = 0; i < items.length; i++) {
             // Update progress
-            setUploadProgress(Math.floor((i / totalItems) * 100));
+            const progress = Math.floor((i / totalItems) * 100);
+            setUploadProgress(progress);
+            setDeckCreationStatus(`Processing deck ${i+1}/${totalItems} (${progress}%)`);
             
             try {
-              // Process current batch
-              for (const deck of batch) {
-                if (deck.name && Array.isArray(deck.cards)) {
-                  const result = await createDeck(deck.name, deck.cards);
-                  results.push(result);
-                }
+              // Process one deck at a time
+              const deck = items[i];
+              if (deck.name && Array.isArray(deck.cards)) {
+                const result = await createDeck(deck.name, deck.cards);
+                results.push(result);
               }
               
-              // Add a small delay between batches
-              if (i + BATCH_SIZE < items.length) {
-                await new Promise(resolve => setTimeout(resolve, 300));
+              // Add a longer delay between each deck for server compatibility
+              if (i < items.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 1200));
               }
             } catch (err) {
-              console.error(`Error processing batch at index ${i}:`, err);
-              // Continue with next batch despite errors
+              const errorMsg = logError(`Error processing deck at index ${i}`, err);
+              // Continue with next deck despite errors
+              await new Promise(resolve => setTimeout(resolve, 2000)); // Longer delay after error
             }
           }
           
           setUploadProgress(100);
+          setDeckCreationStatus('All decks processed!');
           return results;
         };
 
         if (Array.isArray(data)) {
           // Simple array of strings
+          setDeckCreationStatus('Processing deck...');
           await createDeck(file.name.replace('.json', ''), data);
         } else if (data.cards && Array.isArray(data.cards)) {
           // Single deck with cards property
+          setDeckCreationStatus('Processing deck...');
           await createDeck(data.name || file.name.replace('.json', ''), data.cards);
         } else if (data.decks && Array.isArray(data.decks)) {
           // Multiple decks format
+          setDeckCreationStatus(`Processing ${data.decks.length} decks...`);
           await processDecksWithDelay(data.decks);
         } else {
           setError('Invalid JSON format. Expected an array of strings or object with cards array.');
+          setDeckCreationStatus('Error: Invalid format');
         }
         
         setLoading(false);
         setUploadProgress(0);
+        setTimeout(() => setDeckCreationStatus(''), 3000);
       } catch (err) {
-        setError('Failed to parse JSON: ' + (err.message || 'Unknown error'));
+        const errorMsg = logError('Failed to process file', err);
+        setError('Error processing file: ' + errorMsg);
         setLoading(false);
         setUploadProgress(0);
+        setDeckCreationStatus('Error: ' + errorMsg);
       }
     };
     
-    reader.onerror = function() {
-      setError('Error reading file');
-      setLoading(false);
-      setUploadProgress(0);
-    };
-    
-    reader.readAsText(file);
+    // Start reading the file in chunks
+    readNextChunk();
     setFileInput('');
   };
 
-  // FIXED: Improved deck creation to handle larger decks reliably
+  // ENHANCED: Further improved deck creation for server compatibility
   const createDeck = async (name, cards) => {
     try {
       // Validate inputs
@@ -648,12 +727,13 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       
       // Use a more unique deck name to avoid conflicts
       const timestamp = new Date().getTime();
-      const uniqueName = `${name.substring(0, 30)}_${timestamp}`;
+      const randomString = Math.random().toString(36).substring(2, 8);
+      const uniqueName = `${name.substring(0, 15)}_${randomString}`;
 
       // Limit the size of each card to prevent payload issues
       const processedCards = cards.map(card => {
-        if (typeof card === 'string' && card.length > 500) {
-          return card.substring(0, 500); // Limit to 500 chars
+        if (typeof card === 'string' && card.length > 100) {
+          return card.substring(0, 100); // Reduced to 100 chars for better server compatibility
         }
         return card;
       }).filter(card => card && typeof card === 'string' && card.trim().length > 0);
@@ -662,24 +742,46 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         throw new Error("No valid cards found in deck");
       }
 
-      console.log(`Creating deck "${uniqueName}" with ${processedCards.length} cards`);
+      console.log(`[${APP_VERSION}] Creating deck "${uniqueName}" with ${processedCards.length} cards`);
 
-      // Split large decks into chunks to prevent timeouts
-      const MAX_CARDS_PER_DECK = 30; // Smaller limit for better reliability
+      // Split large decks into smaller chunks for server compatibility
+      const MAX_CARDS_PER_DECK = 10; // Reduced to 10 cards for better server compatibility
+      const MAX_CHUNK_SIZE = 4 * 1024; // Reduced to 4KB maximum payload size for server compatibility
+      
       if (processedCards.length > MAX_CARDS_PER_DECK) {
         const chunks = [];
-        for (let i = 0; i < processedCards.length; i += MAX_CARDS_PER_DECK) {
-          chunks.push(processedCards.slice(i, i + MAX_CARDS_PER_DECK));
+        let currentChunk = [];
+        let currentSize = 0;
+        
+        for (const card of processedCards) {
+          // Roughly estimate the size of the card in the JSON payload
+          const cardSize = JSON.stringify(card).length;
+          
+          // If adding this card would exceed our chunk size or card count, start a new chunk
+          if (currentChunk.length >= MAX_CARDS_PER_DECK || (currentSize + cardSize > MAX_CHUNK_SIZE && currentChunk.length > 0)) {
+            chunks.push([...currentChunk]);
+            currentChunk = [card];
+            currentSize = cardSize;
+          } else {
+            currentChunk.push(card);
+            currentSize += cardSize;
+          }
+        }
+        
+        // Add the last chunk if it has any cards
+        if (currentChunk.length > 0) {
+          chunks.push(currentChunk);
         }
         
         // Create multiple decks
         for (let i = 0; i < chunks.length; i++) {
-          const chunkName = chunks.length > 1 ? `${name} (part ${i+1})` : name;
+          const chunkName = chunks.length > 1 ? `${name} (${i+1}/${chunks.length})` : name;
+          setDeckCreationStatus(`Creating chunk ${i+1}/${chunks.length}`);
           await createDeckChunk(chunkName, chunks[i]);
           
-          // Add a small delay between chunks
+          // Add a larger delay between chunks for server compatibility
           if (i < chunks.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 300));
+            await new Promise(resolve => setTimeout(resolve, 1500)); // Increased delay for better server reliability
           }
         }
         
@@ -688,16 +790,16 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         return await createDeckChunk(name, processedCards);
       }
     } catch (err) {
-      console.error('Failed to create deck:', err);
-      setError('Failed to create deck: ' + (err.message || 'Unknown error'));
+      const errorMsg = logError('Failed to create deck', err);
+      setError('Failed to create deck: ' + errorMsg);
       throw err;
     }
   };
 
-  // Helper function to create a single deck
+  // Helper function to create a single deck - enhanced for server compatibility
   const createDeckChunk = async (name, cards) => {
     try {
-      // Create a new deck with retry logic
+      // Create a new deck with enhanced retry logic
       const newDeck = await safeRoomOperation(() =>
         room.collection('deck').create({
           session_pin: pin,
@@ -707,7 +809,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         })
       );
 
-      console.log('Created new deck:', newDeck);
+      console.log(`[${APP_VERSION}] Created new deck:`, newDeck?.id);
 
       // Update currentDeck to the newly created deck if no deck is selected
       if (!currentDeck) {
@@ -716,12 +818,12 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 
       return newDeck;
     } catch (err) {
-      console.error(`Failed to create deck chunk "${name}":`, err);
-      throw err;
+      const errorMsg = logError(`Failed to create deck chunk "${name}"`, err);
+      throw new Error(`Failed to create deck: ${errorMsg}`);
     }
   };
 
-  // FIXED: Improved text submission for deck creation
+  // ENHANCED: Improved text submission for deck creation with better server compatibility
   const handleTextSubmit = async () => {
     if (!textInput.trim() || !deckName.trim()) {
       alert('Please enter both deck name and cards');
@@ -737,37 +839,56 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       return;
     }
 
+    // Limit the number of cards for better server compatibility
+    if (cards.length > 30) {
+      alert('Too many cards in one deck (max 30). Please split into multiple smaller decks.');
+      return;
+    }
+
     setLoading(true);
     setError(null);
+    setDeckCreationStatus('Processing text input...');
+    
     try {
       await createDeck(deckName, cards);
       setTextInput('');
       setDeckName('');
+      setDeckCreationStatus('Deck created successfully!');
+      setTimeout(() => setDeckCreationStatus(''), 3000);
     } catch (err) {
-      setError('Failed to add deck: ' + (err.message || 'Unknown error'));
+      const errorMsg = logError('Failed to add deck', err);
+      setError('Failed to add deck: ' + errorMsg);
+      setDeckCreationStatus('Error creating deck');
     }
     setLoading(false);
   };
 
   const downloadDecks = () => {
-    const decksToDownload = {
-      decks: decks.map(deck => ({
-        name: deck.name,
-        cards: deck.cards
-      }))
-    };
+    try {
+      const decksToDownload = {
+        version: APP_VERSION,
+        exportDate: new Date().toISOString(),
+        decks: decks.map(deck => ({
+          name: deck.name,
+          cards: deck.cards
+        }))
+      };
 
-    const json = JSON.stringify(decksToDownload, null, 2);
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
+      const json = JSON.stringify(decksToDownload, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
 
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'improv_decks.json';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `improv_decks_v${APP_VERSION}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      logError('Error downloading decks', err);
+      alert('Error creating download. Please try again.');
+    }
   };
 
   const getTimeLeft = (expiresAt) => {
@@ -821,7 +942,8 @@ function ConductorView({ setView, sessionData, setSessionData }) {
                   }}
                 ></div>
               </div>
-              <p>Uploading: {uploadProgress}%</p>
+              <p>Progress: {uploadProgress}%</p>
+              {deckCreationStatus && <p>{deckCreationStatus}</p>}
             </div>
           )}
         </div>
@@ -851,6 +973,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           >
             {loading ? 'Adding...' : 'Add Deck'}
           </button>
+          {deckCreationStatus && <p style={{ marginTop: '5px' }}>{deckCreationStatus}</p>}
         </div>
 
         {error && <p style={{ color: 'red', marginBottom: '10px' }}>{error}</p>}
@@ -979,13 +1102,18 @@ function PlayerView({ pin, playerName, setView }) {
   const [isSessionActive, setIsSessionActive] = useState(true);
   const [loading, setLoading] = useState(true);
   const [retries, setRetries] = useState(0);
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
+  const initialSetupDone = useRef(false);
 
   // Find player record and subscribe to changes - FIXED: improved reliability
   useEffect(() => {
+    if (initialSetupDone.current) return;
+    
     const setupPlayer = async () => {
       try {
         setLoading(true);
-        console.log('Looking for player with pin:', pin, 'and name:', playerName);
+        setConnectionStatus('connecting');
+        console.log(`[${APP_VERSION}] Looking for player with pin:`, pin, 'and name:', playerName);
 
         // Make sure session exists first
         const sessions = await safeRoomOperation(() => 
@@ -995,9 +1123,12 @@ function PlayerView({ pin, playerName, setView }) {
         if (!sessions || sessions.length === 0) {
           setError('Session not found. Please check your PIN.');
           setLoading(false);
+          setConnectionStatus('error');
           return;
         }
 
+        setConnectionStatus('checking player');
+        
         // Try to find the existing player
         let players = await safeRoomOperation(() => 
           room.collection('player').filter({ 
@@ -1006,11 +1137,12 @@ function PlayerView({ pin, playerName, setView }) {
           }).getList()
         );
 
-        console.log('Found players:', players);
+        console.log(`[${APP_VERSION}] Found players:`, players?.length || 0);
 
         // If no players found, create one with retries
         if (!players || players.length === 0) {
-          console.log('Player not found, attempting to create...');
+          console.log(`[${APP_VERSION}] Player not found, attempting to create...`);
+          setConnectionStatus('creating player');
           
           // Try to create the player with retries
           let playerCreated = false;
@@ -1027,12 +1159,13 @@ function PlayerView({ pin, playerName, setView }) {
                   expires_at: null,
                 })
               );
-              console.log('Created new player:', newPlayer);
+              console.log(`[${APP_VERSION}] Created new player:`, newPlayer?.id);
               setPlayerId(newPlayer.id);
               playerCreated = true;
             } catch (createErr) {
-              console.error(`Failed to create player (attempt ${createRetryCount + 1}):`, createErr);
+              const errorMsg = logError(`Failed to create player (attempt ${createRetryCount + 1})`, createErr);
               createRetryCount++;
+              setConnectionStatus(`retry ${createRetryCount}/${maxCreateRetries}`);
               
               // Check if player was actually created despite the error
               await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1045,7 +1178,7 @@ function PlayerView({ pin, playerName, setView }) {
               );
               
               if (players && players.length > 0) {
-                console.log('Player was created despite error');
+                console.log(`[${APP_VERSION}] Player was created despite error`);
                 setPlayerId(players[0].id);
                 playerCreated = true;
                 break;
@@ -1060,6 +1193,7 @@ function PlayerView({ pin, playerName, setView }) {
           if (!playerCreated) {
             setError('Could not join session. Please try again with a different name.');
             setLoading(false);
+            setConnectionStatus('error');
             return;
           }
         } else {
@@ -1067,6 +1201,8 @@ function PlayerView({ pin, playerName, setView }) {
         }
 
         setLoading(false);
+        setConnectionStatus('connected');
+        initialSetupDone.current = true;
 
         // Subscribe to player changes - FIXED: Improved reliability
         const subscribeToPlayerUpdates = () => {
@@ -1094,7 +1230,7 @@ function PlayerView({ pin, playerName, setView }) {
                 }
               });
           } catch (subErr) {
-            console.error("Error subscribing to player updates:", subErr);
+            logError("Error subscribing to player updates", subErr);
             // Retry subscription after a delay
             setTimeout(subscribeToPlayerUpdates, 3000);
             return () => {}; // Return empty unsubscribe function
@@ -1103,13 +1239,15 @@ function PlayerView({ pin, playerName, setView }) {
         
         return subscribeToPlayerUpdates();
       } catch (err) {
-        console.error('Failed to setup player:', err);
+        const errorMsg = logError('Failed to setup player', err);
         if (retries < 3) {
           setRetries(retries + 1);
+          setConnectionStatus(`retrying (${retries + 1}/3)`);
           setTimeout(() => setupPlayer(), 2000); // Retry after delay
         } else {
           setError('Failed to connect to session. Please try again.');
           setLoading(false);
+          setConnectionStatus('error');
         }
       }
     };
@@ -1141,7 +1279,7 @@ function PlayerView({ pin, playerName, setView }) {
               }
             });
         } catch (err) {
-          console.error("Error subscribing to session:", err);
+          logError("Error subscribing to session", err);
           // Retry subscription after a delay
           setTimeout(subscribeToSession, 3000);
           return () => {}; // Return empty unsubscribe function
@@ -1178,7 +1316,7 @@ function PlayerView({ pin, playerName, setView }) {
                   }
                 });
             } catch (err) {
-              console.error("Error refreshing player data:", err);
+              logError("Error refreshing player data", err);
             }
           }
           return newTime;
@@ -1189,7 +1327,7 @@ function PlayerView({ pin, playerName, setView }) {
     }
   }, [currentCard, timeLeft, pin, playerName]);
 
-  // FIXED: Improved progress calculation for better visual feedback
+  // ENHANCED: Improved progress calculation for better visual feedback
   const getProgressWidth = () => {
     if (timeLeft <= 0 || totalTime <= 0) return 0;
     // Calculate percentage with a minimum to ensure visibility
@@ -1202,7 +1340,18 @@ function PlayerView({ pin, playerName, setView }) {
       <div className="fullscreen-card">
         <div>
           <h2 className="header">Connecting to session...</h2>
-          <p>Please wait</p>
+          <p>Status: {connectionStatus}</p>
+          <div style={{ marginTop: '20px', width: '100%', height: '4px', backgroundColor: '#eee', borderRadius: '2px' }}>
+            <div 
+              style={{ 
+                width: '30%', 
+                height: '100%', 
+                backgroundColor: '#000', 
+                borderRadius: '2px',
+                animation: 'progress-bar 1.5s infinite'
+              }}
+            ></div>
+          </div>
         </div>
       </div>
     );
@@ -1243,10 +1392,10 @@ function PlayerView({ pin, playerName, setView }) {
           <div style={{ width: '100%' }}>
             <h1 className="card-text">{currentCard}</h1>
             
-            {/* FIXED: Enhanced countdown visualization */}
+            {/* ENHANCED: Improved countdown visualization */}
             <div style={{ marginTop: '30px', textAlign: 'center' }}>
-              <span style={{ fontSize: '24px', fontWeight: 'bold' }}>{timeLeft}</span>
-              <span style={{ fontSize: '18px' }}> seconds remaining</span>
+              <span style={{ fontSize: '32px', fontWeight: 'bold' }}>{timeLeft}</span>
+              <span style={{ fontSize: '20px' }}> seconds remaining</span>
             </div>
             
             <div className="timer-bar">
@@ -1254,7 +1403,7 @@ function PlayerView({ pin, playerName, setView }) {
                 className="timer-progress"
                 style={{ 
                   width: `${getProgressWidth()}%`,
-                  transition: 'width 1s linear'
+                  transition: 'width 0.95s linear'
                 }}
               ></div>
             </div>
@@ -1269,6 +1418,9 @@ function PlayerView({ pin, playerName, setView }) {
             {!isSessionActive && (
               <p>Waiting for conductor to start the session</p>
             )}
+            <div className="connection-status">
+              Status: {connectionStatus === 'connected' ? '✓ Connected' : connectionStatus}
+            </div>
           </div>
         </div>
       )}
@@ -1281,6 +1433,6 @@ try {
   const root = createRoot(document.getElementById('root'));
   root.render(<App />);
 } catch (err) {
-  console.error("Error rendering app:", err);
-  document.getElementById('loading').innerHTML = 'Error loading application: ' + (err.message || 'Unknown error');
+  const errorMsg = logError("Error rendering app", err);
+  document.getElementById('loading').innerHTML = 'Error loading application: ' + errorMsg;
 }
