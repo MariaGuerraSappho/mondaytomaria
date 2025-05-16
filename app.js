@@ -1,5 +1,5 @@
 // App Version for tracking
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.4.0";
 
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
@@ -299,6 +299,8 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   const [error, setError] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [deckCreationStatus, setDeckCreationStatus] = useState('');
+  const [lastDeckRefresh, setLastDeckRefresh] = useState(0);
+  const [debugInfo, setDebugInfo] = useState({ lastAction: '', decksCount: 0 });
 
   // Generate PIN and create session on component mount
   useEffect(() => {
@@ -390,29 +392,82 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     }
   }, [pin]);
 
-  // Subscribe to decks in this session - FIXED: improved reliability
+  // FIXED: Improved deck subscription with recovery and debugging
   useEffect(() => {
     if (pin) {
-      const subscribeToDecks = () => {
+      let isSubscribed = false;
+      
+      const refreshDecks = async () => {
         try {
-          return room.collection('deck')
+          setDebugInfo(prev => ({ ...prev, lastAction: 'Manual refresh of decks' }));
+          const decksList = await room.collection('deck')
+            .filter({ session_pin: pin })
+            .getList();
+          
+          if (decksList) {
+            console.log(`[${APP_VERSION}] Manually refreshed decks: ${decksList.length}`);
+            setDecks(decksList);
+            setDebugInfo(prev => ({ ...prev, decksCount: decksList.length }));
+            
+            if (decksList.length > 0 && !currentDeck) {
+              setCurrentDeck(decksList[0].id);
+            }
+          }
+          
+          setLastDeckRefresh(Date.now());
+        } catch (err) {
+          logError("Error refreshing decks", err);
+        }
+      };
+      
+      const setupSubscription = () => {
+        if (isSubscribed) return; // Prevent multiple subscriptions
+        
+        try {
+          setDebugInfo(prev => ({ ...prev, lastAction: 'Setting up deck subscription' }));
+          
+          const unsubscribe = room.collection('deck')
             .filter({ session_pin: pin })
             .subscribe(decksList => {
-              console.log(`[${APP_VERSION}] Decks updated:`, decksList?.length || 0);
-              setDecks(decksList || []);
-              if (decksList && decksList.length > 0 && !currentDeck) {
-                setCurrentDeck(decksList[0].id);
+              console.log(`[${APP_VERSION}] Decks subscription update:`, decksList?.length || 0);
+              
+              if (decksList) {
+                setDecks(decksList);
+                setDebugInfo(prev => ({ ...prev, decksCount: decksList.length }));
+                
+                if (decksList.length > 0 && !currentDeck) {
+                  setCurrentDeck(decksList[0].id);
+                }
               }
             });
+          
+          isSubscribed = true;
+          return unsubscribe;
         } catch (err) {
           logError("Error subscribing to decks", err);
+          isSubscribed = false;
+          
           // Retry subscription after a delay
-          setTimeout(subscribeToDecks, 3000);
+          setTimeout(setupSubscription, 3000);
           return () => {}; // Return empty unsubscribe function
         }
       };
       
-      return subscribeToDecks();
+      // Initial subscription setup
+      const unsubscribe = setupSubscription();
+      
+      // Periodic refresh as a fallback
+      const refreshInterval = setInterval(refreshDecks, 30000); // Every 30 seconds
+      
+      // Force a refresh 2 seconds after mounting to ensure we have data
+      setTimeout(refreshDecks, 2000);
+      
+      return () => {
+        if (typeof unsubscribe === 'function') {
+          unsubscribe();
+        }
+        clearInterval(refreshInterval);
+      };
     }
   }, [pin]);
 
@@ -579,7 +634,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     });
   };
 
-  // ENHANCED: Further improved file upload for server compatibility
+  // FIXED: Further improved file upload for better compatibility and smaller payloads
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -588,18 +643,19 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     setError(null);
     setUploadProgress(0);
     setDeckCreationStatus('');
+    setDebugInfo(prev => ({ ...prev, lastAction: 'Starting file upload' }));
 
     // Add a size limit to prevent timeouts
-    const MAX_FILE_SIZE = 500 * 1024; // Reduced to 500KB for better server compatibility
+    const MAX_FILE_SIZE = 250 * 1024; // Reduced to 250KB for better server compatibility
     if (file.size > MAX_FILE_SIZE) {
-      alert('File is too large (max 500KB). Please split into smaller files.');
+      alert('File is too large (max 250KB). Please split into smaller files.');
       setLoading(false);
       setFileInput('');
       return;
     }
 
     // Use smaller file reader chunks for better reliability
-    const CHUNK_SIZE = 64 * 1024; // Reduced to 64KB chunks for better server compatibility
+    const CHUNK_SIZE = 32 * 1024; // Reduced to 32KB chunks for better server compatibility
     let offset = 0;
     const fileSize = file.size;
     let fileContent = '';
@@ -638,6 +694,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     
     const processFileContent = async (content) => {
       try {
+        setDebugInfo(prev => ({ ...prev, lastAction: 'Parsing JSON content' }));
         setDeckCreationStatus('Parsing JSON...');
         // Use try-catch for JSON parsing to avoid crashing
         let data;
@@ -652,63 +709,118 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           const totalItems = items.length;
           const results = [];
           
-          // Process one deck at a time with longer delays for server compatibility
+          // Process 1 deck at a time with longer delays for server compatibility
           for (let i = 0; i < items.length; i++) {
             // Update progress
             const progress = Math.floor((i / totalItems) * 100);
             setUploadProgress(progress);
             setDeckCreationStatus(`Processing deck ${i+1}/${totalItems} (${progress}%)`);
+            setDebugInfo(prev => ({ ...prev, lastAction: `Processing deck ${i+1}/${totalItems}` }));
             
             try {
               // Process one deck at a time
               const deck = items[i];
               if (deck.name && Array.isArray(deck.cards)) {
                 const result = await createDeck(deck.name, deck.cards);
-                results.push(result);
+                if (result) {
+                  results.push(result);
+                  
+                  // Force a refresh of decks after each successful creation
+                  try {
+                    const refreshedDecks = await room.collection('deck')
+                      .filter({ session_pin: pin })
+                      .getList();
+                    
+                    if (refreshedDecks) {
+                      console.log(`[${APP_VERSION}] Refreshed decks after create:`, refreshedDecks.length);
+                      setDecks(refreshedDecks);
+                      setDebugInfo(prev => ({ ...prev, decksCount: refreshedDecks.length }));
+                    }
+                  } catch (refreshErr) {
+                    logError("Error refreshing decks after create", refreshErr);
+                  }
+                }
               }
               
               // Add a longer delay between each deck for server compatibility
               if (i < items.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1200));
+                await new Promise(resolve => setTimeout(resolve, 2000));
               }
             } catch (err) {
               const errorMsg = logError(`Error processing deck at index ${i}`, err);
               // Continue with next deck despite errors
-              await new Promise(resolve => setTimeout(resolve, 2000)); // Longer delay after error
+              await new Promise(resolve => setTimeout(resolve, 3000)); // Longer delay after error
             }
           }
           
           setUploadProgress(100);
           setDeckCreationStatus('All decks processed!');
+          
+          // Final refresh of decks
+          try {
+            const finalDecks = await room.collection('deck')
+              .filter({ session_pin: pin })
+              .getList();
+            
+            if (finalDecks) {
+              console.log(`[${APP_VERSION}] Final deck refresh:`, finalDecks.length);
+              setDecks(finalDecks);
+              setDebugInfo(prev => ({ ...prev, decksCount: finalDecks.length }));
+            }
+          } catch (finalErr) {
+            logError("Error in final deck refresh", finalErr);
+          }
+          
           return results;
         };
 
         if (Array.isArray(data)) {
           // Simple array of strings
           setDeckCreationStatus('Processing deck...');
+          setDebugInfo(prev => ({ ...prev, lastAction: 'Processing simple array deck' }));
           await createDeck(file.name.replace('.json', ''), data);
         } else if (data.cards && Array.isArray(data.cards)) {
           // Single deck with cards property
           setDeckCreationStatus('Processing deck...');
+          setDebugInfo(prev => ({ ...prev, lastAction: 'Processing single deck object' }));
           await createDeck(data.name || file.name.replace('.json', ''), data.cards);
         } else if (data.decks && Array.isArray(data.decks)) {
           // Multiple decks format
           setDeckCreationStatus(`Processing ${data.decks.length} decks...`);
+          setDebugInfo(prev => ({ ...prev, lastAction: `Processing ${data.decks.length} decks from array` }));
           await processDecksWithDelay(data.decks);
         } else {
           setError('Invalid JSON format. Expected an array of strings or object with cards array.');
           setDeckCreationStatus('Error: Invalid format');
+          setDebugInfo(prev => ({ ...prev, lastAction: 'Error: Invalid JSON format' }));
+        }
+        
+        // Final deck refresh
+        try {
+          setDebugInfo(prev => ({ ...prev, lastAction: 'Final deck refresh after processing' }));
+          const finalDecks = await room.collection('deck')
+            .filter({ session_pin: pin })
+            .getList();
+            
+          console.log(`[${APP_VERSION}] Final deck count after upload:`, finalDecks?.length || 0);
+          if (finalDecks) {
+            setDecks(finalDecks);
+            setDebugInfo(prev => ({ ...prev, decksCount: finalDecks.length }));
+          }
+        } catch (err) {
+          logError("Error in final deck refresh", err);
         }
         
         setLoading(false);
         setUploadProgress(0);
-        setTimeout(() => setDeckCreationStatus(''), 3000);
+        setTimeout(() => setDeckCreationStatus(''), 5000);
       } catch (err) {
         const errorMsg = logError('Failed to process file', err);
         setError('Error processing file: ' + errorMsg);
         setLoading(false);
         setUploadProgress(0);
         setDeckCreationStatus('Error: ' + errorMsg);
+        setDebugInfo(prev => ({ ...prev, lastAction: 'Error processing file: ' + errorMsg }));
       }
     };
     
@@ -717,7 +829,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     setFileInput('');
   };
 
-  // ENHANCED: Further improved deck creation for server compatibility
+  // FIXED: Improved deck creation with smaller batch sizes and individual error handling
   const createDeck = async (name, cards) => {
     try {
       // Validate inputs
@@ -725,15 +837,17 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         throw new Error("Invalid deck data");
       }
       
+      setDebugInfo(prev => ({ ...prev, lastAction: `Creating deck: ${name} with ${cards.length} cards` }));
+      
       // Use a more unique deck name to avoid conflicts
       const timestamp = new Date().getTime();
-      const randomString = Math.random().toString(36).substring(2, 8);
-      const uniqueName = `${name.substring(0, 15)}_${randomString}`;
+      const randomString = Math.random().toString(36).substring(2, 7);
+      const uniqueName = `${name.substring(0, 12)}_${randomString}`;
 
       // Limit the size of each card to prevent payload issues
       const processedCards = cards.map(card => {
-        if (typeof card === 'string' && card.length > 100) {
-          return card.substring(0, 100); // Reduced to 100 chars for better server compatibility
+        if (typeof card === 'string' && card.length > 80) {
+          return card.substring(0, 80); // Reduced to 80 chars for better server compatibility
         }
         return card;
       }).filter(card => card && typeof card === 'string' && card.trim().length > 0);
@@ -745,8 +859,8 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       console.log(`[${APP_VERSION}] Creating deck "${uniqueName}" with ${processedCards.length} cards`);
 
       // Split large decks into smaller chunks for server compatibility
-      const MAX_CARDS_PER_DECK = 10; // Reduced to 10 cards for better server compatibility
-      const MAX_CHUNK_SIZE = 4 * 1024; // Reduced to 4KB maximum payload size for server compatibility
+      const MAX_CARDS_PER_DECK = 5; // Reduced to 5 cards for better server compatibility
+      const MAX_CHUNK_SIZE = 2 * 1024; // Reduced to 2KB maximum payload size for server compatibility
       
       if (processedCards.length > MAX_CARDS_PER_DECK) {
         const chunks = [];
@@ -777,11 +891,30 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         for (let i = 0; i < chunks.length; i++) {
           const chunkName = chunks.length > 1 ? `${name} (${i+1}/${chunks.length})` : name;
           setDeckCreationStatus(`Creating chunk ${i+1}/${chunks.length}`);
-          await createDeckChunk(chunkName, chunks[i]);
+          setDebugInfo(prev => ({ ...prev, lastAction: `Creating chunk ${i+1}/${chunks.length}` }));
           
-          // Add a larger delay between chunks for server compatibility
-          if (i < chunks.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1500)); // Increased delay for better server reliability
+          try {
+            const result = await createDeckChunk(chunkName, chunks[i]);
+            
+            // Force a refresh after each chunk
+            const refreshedDecks = await room.collection('deck')
+              .filter({ session_pin: pin })
+              .getList();
+              
+            if (refreshedDecks) {
+              console.log(`[${APP_VERSION}] Refreshed decks after chunk:`, refreshedDecks.length);
+              setDecks(refreshedDecks);
+              setDebugInfo(prev => ({ ...prev, decksCount: refreshedDecks.length }));
+            }
+            
+            // Add a larger delay between chunks for server compatibility
+            if (i < chunks.length - 1) {
+              await new Promise(resolve => setTimeout(resolve, 2000)); // Increased delay for better server reliability
+            }
+          } catch (chunkErr) {
+            logError(`Error creating chunk ${i+1}/${chunks.length}`, chunkErr);
+            // Continue with next chunk despite errors
+            await new Promise(resolve => setTimeout(resolve, 3000)); // Longer delay after error
           }
         }
         
@@ -792,13 +925,16 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     } catch (err) {
       const errorMsg = logError('Failed to create deck', err);
       setError('Failed to create deck: ' + errorMsg);
+      setDebugInfo(prev => ({ ...prev, lastAction: 'Error: ' + errorMsg }));
       throw err;
     }
   };
 
-  // Helper function to create a single deck - enhanced for server compatibility
+  // Helper function to create a single deck - FIXED: further reduced payload size
   const createDeckChunk = async (name, cards) => {
     try {
+      setDebugInfo(prev => ({ ...prev, lastAction: `Creating deck chunk "${name}" with ${cards.length} cards` }));
+      
       // Create a new deck with enhanced retry logic
       const newDeck = await safeRoomOperation(() =>
         room.collection('deck').create({
@@ -810,6 +946,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       );
 
       console.log(`[${APP_VERSION}] Created new deck:`, newDeck?.id);
+      setDebugInfo(prev => ({ ...prev, lastAction: `Successfully created deck: ${newDeck?.id}` }));
 
       // Update currentDeck to the newly created deck if no deck is selected
       if (!currentDeck) {
@@ -819,17 +956,19 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       return newDeck;
     } catch (err) {
       const errorMsg = logError(`Failed to create deck chunk "${name}"`, err);
+      setDebugInfo(prev => ({ ...prev, lastAction: `Error creating deck: ${errorMsg}` }));
       throw new Error(`Failed to create deck: ${errorMsg}`);
     }
   };
 
-  // ENHANCED: Improved text submission for deck creation with better server compatibility
+  // FIXED: Improved text submission for deck creation with better reliability
   const handleTextSubmit = async () => {
     if (!textInput.trim() || !deckName.trim()) {
       alert('Please enter both deck name and cards');
       return;
     }
 
+    // Pre-process cards to filter empty lines and trim whitespace
     const cards = textInput.split('\n')
       .map(line => line.trim())
       .filter(line => line.length > 0);
@@ -848,19 +987,68 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     setLoading(true);
     setError(null);
     setDeckCreationStatus('Processing text input...');
+    setDebugInfo(prev => ({ ...prev, lastAction: 'Starting text deck creation' }));
     
     try {
-      await createDeck(deckName, cards);
+      const result = await createDeck(deckName, cards);
+      
+      // Force a final refresh after creating the deck
+      try {
+        setDebugInfo(prev => ({ ...prev, lastAction: 'Refreshing decks after text creation' }));
+        const finalDecks = await room.collection('deck')
+          .filter({ session_pin: pin })
+          .getList();
+          
+        console.log(`[${APP_VERSION}] Final deck count after text input:`, finalDecks?.length || 0);
+        if (finalDecks) {
+          setDecks(finalDecks);
+          setDebugInfo(prev => ({ ...prev, decksCount: finalDecks.length }));
+        }
+      } catch (err) {
+        logError("Error in final deck refresh after text input", err);
+      }
+      
       setTextInput('');
       setDeckName('');
       setDeckCreationStatus('Deck created successfully!');
-      setTimeout(() => setDeckCreationStatus(''), 3000);
+      setDebugInfo(prev => ({ ...prev, lastAction: 'Text deck created successfully' }));
+      setTimeout(() => setDeckCreationStatus(''), 5000);
     } catch (err) {
       const errorMsg = logError('Failed to add deck', err);
       setError('Failed to add deck: ' + errorMsg);
       setDeckCreationStatus('Error creating deck');
+      setDebugInfo(prev => ({ ...prev, lastAction: 'Error creating text deck: ' + errorMsg }));
     }
     setLoading(false);
+  };
+
+  // ADDED: Manual deck refresh function
+  const refreshDecksList = async () => {
+    setDebugInfo(prev => ({ ...prev, lastAction: 'Manual refresh requested' }));
+    setDeckCreationStatus('Refreshing decks...');
+    
+    try {
+      const refreshedDecks = await room.collection('deck')
+        .filter({ session_pin: pin })
+        .getList();
+        
+      console.log(`[${APP_VERSION}] Manual deck refresh:`, refreshedDecks?.length || 0);
+      if (refreshedDecks) {
+        setDecks(refreshedDecks);
+        setDebugInfo(prev => ({ ...prev, decksCount: refreshedDecks.length }));
+        setDeckCreationStatus(`Found ${refreshedDecks.length} decks`);
+        setTimeout(() => setDeckCreationStatus(''), 3000);
+      } else {
+        setDeckCreationStatus('No decks found');
+        setTimeout(() => setDeckCreationStatus(''), 3000);
+      }
+      
+      setLastDeckRefresh(Date.now());
+    } catch (err) {
+      const errorMsg = logError("Error manually refreshing decks", err);
+      setDeckCreationStatus('Error refreshing: ' + errorMsg);
+      setTimeout(() => setDeckCreationStatus(''), 5000);
+    }
   };
 
   const downloadDecks = () => {
@@ -899,7 +1087,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 
   return (
     <div className="flex flex-col gap-4">
-      <h1 className="header">Conductor Panel</h1>
+      <h1 className="header">Conductor Panel <span style={{ fontSize: '14px' }}>v{APP_VERSION}</span></h1>
 
       <div className="card">
         <h2 className="header">Session PIN: {pin}</h2>
@@ -980,6 +1168,20 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 
         <div>
           <h3>Available Decks ({decks.length})</h3>
+          <div style={{ marginBottom: '10px' }}>
+            <button 
+              className="btn" 
+              onClick={refreshDecksList}
+              disabled={loading}
+              style={{ marginRight: '10px' }}
+            >
+              Refresh Decks List
+            </button>
+            <span style={{ fontSize: '12px', color: '#888' }}>
+              Last refreshed: {lastDeckRefresh ? new Date(lastDeckRefresh).toLocaleTimeString() : 'never'}
+            </span>
+          </div>
+          
           {decks.length === 0 ? (
             <p>No decks uploaded yet</p>
           ) : (
@@ -1000,6 +1202,16 @@ function ConductorView({ setView, sessionData, setSessionData }) {
               </button>
             </>
           )}
+          
+          {/* Debug info */}
+          <div style={{ marginTop: '10px', fontSize: '12px', color: '#888', borderTop: '1px solid #eee', paddingTop: '10px' }}>
+            <details>
+              <summary>Debug Info</summary>
+              <p>Last action: {debugInfo.lastAction || 'None'}</p>
+              <p>Decks count (debug): {debugInfo.decksCount}</p>
+              <p>App version: {APP_VERSION}</p>
+            </details>
+          </div>
         </div>
       </div>
 
