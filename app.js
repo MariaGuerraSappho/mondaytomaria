@@ -1,35 +1,42 @@
 // App Version for tracking
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.10.0";
 
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
 
-// Initialize WebsimSocket with error handling
+// Initialize WebsimSocket with ultra-resilient error handling
 let room;
 try {
   room = new WebsimSocket();
-  console.log("WebsimSocket initialized successfully");
+  console.log(`[${APP_VERSION}] WebsimSocket initialized successfully`);
 } catch (err) {
-  console.error("Error initializing WebsimSocket:", err);
+  console.error(`[${APP_VERSION}] Error initializing WebsimSocket:`, err);
   // We have a fallback implementation in the HTML
   room = new WebsimSocket();
 }
 
-// Enhanced error handling and reporting
+// Enhanced error handling and reporting with timestamps
 const logError = (context, error) => {
+  const timestamp = new Date().toISOString();
   const errorMessage = error?.message || String(error) || "Unknown error";
-  console.error(`[${APP_VERSION}] ${context}:`, error);
+  console.error(`[${APP_VERSION}][${timestamp}] ${context}:`, error);
   return errorMessage;
 };
 
-// Utility function to safely perform room operations with retry and improved error handling
-const safeRoomOperation = async (operation, maxRetries = 5) => {
+// Ultra-resilient room operation with configurable timeouts and exponential backoff
+const safeRoomOperation = async (operation, maxRetries = 5, timeout = 8000) => {
   let retries = 0;
   let lastError = null;
   
   while (retries < maxRetries) {
     try {
-      return await operation();
+      // Create a timeout promise to ensure operations don't hang indefinitely
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Operation timed out')), timeout)
+      );
+      
+      // Race between the actual operation and the timeout
+      return await Promise.race([operation(), timeoutPromise]);
     } catch (err) {
       lastError = err;
       const errorMsg = logError(`Operation failed (attempt ${retries + 1})`, err);
@@ -44,9 +51,9 @@ const safeRoomOperation = async (operation, maxRetries = 5) => {
       }
       
       // Exponential backoff with jitter
-      const baseDelay = isTimeout ? 800 : 500;
-      const jitter = Math.random() * 300;
-      const delay = (baseDelay * retries) + jitter;
+      const baseDelay = isTimeout ? 1200 : 600;
+      const jitter = Math.random() * 500;
+      const delay = (baseDelay * Math.pow(1.5, retries)) + jitter;
       
       console.log(`[${APP_VERSION}] Retrying in ${Math.round(delay)}ms...`);
       await new Promise(resolve => setTimeout(resolve, delay));
@@ -54,6 +61,12 @@ const safeRoomOperation = async (operation, maxRetries = 5) => {
   }
   
   throw lastError;
+};
+
+// Status reporting mechanism for debugging
+const reportStatus = (component, status, details = {}) => {
+  const timestamp = new Date().toISOString();
+  console.log(`[${APP_VERSION}][${timestamp}][${component}] ${status}`, details);
 };
 
 // Main App Component
@@ -164,22 +177,41 @@ function HomeView({ setView }) {
   );
 }
 
-// Join View
+// Join View with enhanced reliability
 function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
   const [error, setError] = useState('');
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [joinStatus, setJoinStatus] = useState('');
+  const subscriptionAttempted = useRef(false);
 
+  // Subscribe to sessions with retries
   useEffect(() => {
-    // Subscribe to sessions
-    try {
-      return room.collection('session').subscribe(sessionsList => {
-        setSessions(sessionsList);
-      });
-    } catch (err) {
-      const errorMsg = logError("Error subscribing to sessions", err);
-      setError("Could not connect to session data. Please refresh and try again.");
-    }
+    if (subscriptionAttempted.current) return;
+    subscriptionAttempted.current = true;
+    
+    const attemptSubscription = async (retryCount = 0) => {
+      try {
+        reportStatus('JoinView', 'Subscribing to sessions', { retryCount });
+        return room.collection('session').subscribe(sessionsList => {
+          reportStatus('JoinView', 'Sessions updated', { count: sessionsList?.length || 0 });
+          setSessions(sessionsList || []);
+        });
+      } catch (err) {
+        const errorMsg = logError(`Error subscribing to sessions (retry ${retryCount})`, err);
+        
+        if (retryCount < 3) {
+          reportStatus('JoinView', 'Retrying session subscription', { retryCount });
+          setTimeout(() => attemptSubscription(retryCount + 1), 2000 * (retryCount + 1));
+          return () => {};
+        } else {
+          setError("Could not connect to session data. Please refresh and try again.");
+          return () => {};
+        }
+      }
+    };
+    
+    return attemptSubscription();
   }, []);
 
   const handleJoin = async () => {
@@ -190,59 +222,83 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
 
     setLoading(true);
     setError('');
+    setJoinStatus('Validating session...');
 
     try {
       // Store player name for convenience
       localStorage.setItem('playerName', playerName);
       localStorage.setItem('lastPin', pin);
       
-      // Check if session exists
-      const sessions = await safeRoomOperation(() => 
-        room.collection('session').filter({ pin }).getList()
+      // Check if session exists - with extended timeout
+      setJoinStatus('Checking if session exists...');
+      const sessions = await safeRoomOperation(
+        () => room.collection('session').filter({ pin }).getList(),
+        3,  // 3 retries
+        12000 // 12 second timeout
       );
       
       if (!sessions || sessions.length === 0) {
         setError('Invalid PIN');
         setLoading(false);
+        setJoinStatus('');
         return;
       }
 
-      // Check if player limit reached
-      const players = await safeRoomOperation(() => 
-        room.collection('player').filter({ session_pin: pin }).getList()
+      // Check if player limit reached - with extended timeout
+      setJoinStatus('Checking player count...');
+      const players = await safeRoomOperation(
+        () => room.collection('player').filter({ session_pin: pin }).getList(),
+        3,  // 3 retries
+        12000 // 12 second timeout
       );
       
-      if (players.length >= 10) {
+      if (players && players.length >= 10) {
         setError('Session is full (max 10 players)');
         setLoading(false);
+        setJoinStatus('');
         return;
       }
 
       // Check if player already exists with this name
-      const existingPlayer = players.find(p => p.name === playerName && p.session_pin === pin);
+      setJoinStatus('Checking player registration...');
+      const existingPlayer = players?.find(p => 
+        p.name === playerName && p.session_pin === pin
+      );
+      
       if (!existingPlayer) {
-        // Join session - create new player
+        // Join session - create new player with ultra-reliability
+        setJoinStatus('Creating player...');
         try {
-          await safeRoomOperation(() => 
-            room.collection('player').create({
+          await safeRoomOperation(
+            () => room.collection('player').create({
               session_pin: pin,
               name: playerName,
               current_card: null,
               expires_at: null,
-            })
+              joined_at: new Date().toISOString(), // Add timestamp for debugging
+              client_info: `${APP_VERSION}|${navigator.userAgent.slice(0, 50)}` // Add client info for debugging
+            }),
+            5, // 5 retries
+            15000 // 15 second timeout
           );
+          reportStatus('JoinView', 'Player created successfully', { pin, name: playerName });
         } catch (playerErr) {
           logError('Failed to create player', playerErr);
           // We'll proceed to player view anyway and retry there
+          reportStatus('JoinView', 'Proceeding despite player creation error', { pin, name: playerName });
         }
       }
 
-      setLoading(false);
-      setView('player');
+      setJoinStatus('Joining session...');
+      setTimeout(() => {
+        setLoading(false);
+        setView('player');
+      }, 500);
     } catch (err) {
       const errorMsg = logError('Failed to join session', err);
-      setError(`Failed to join session: ${errorMsg}`);
+      setError(`Failed to join: ${errorMsg.slice(0, 100)}`);
       setLoading(false);
+      setJoinStatus('');
     }
   };
 
@@ -266,6 +322,7 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
           onChange={(e) => setPlayerName(e.target.value)}
         />
         {error && <p style={{ color: 'red', marginBottom: '10px' }}>{error}</p>}
+        {joinStatus && <p style={{ color: '#555', marginBottom: '10px' }}>{joinStatus}</p>}
         <button 
           className={`btn btn-primary ${loading ? 'btn-disabled' : ''}`} 
           onClick={handleJoin}
@@ -281,7 +338,7 @@ function JoinView({ pin, setPin, playerName, setPlayerName, setView }) {
   );
 }
 
-// Conductor View
+// Conductor View with completely redesigned deck handling
 function ConductorView({ setView, sessionData, setSessionData }) {
   const [decks, setDecks] = useState([]);
   const [currentDeck, setCurrentDeck] = useState(null);
@@ -297,10 +354,39 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   const [deckName, setDeckName] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [uploadProgress, setUploadProgress] = useState(0);
   const [deckCreationStatus, setDeckCreationStatus] = useState('');
   const [lastDeckRefresh, setLastDeckRefresh] = useState(0);
-  const [debugInfo, setDebugInfo] = useState({ lastAction: '', decksCount: 0 });
+  const [manualRefreshCount, setManualRefreshCount] = useState(0);
+  const [savedDecks, setSavedDecks] = useState([]);
+  const [showSavedDecks, setShowSavedDecks] = useState(false);
+  const [deckOperationId, setDeckOperationId] = useState(0); 
+  const deckRefIntervalRef = useRef(null); 
+
+  // Load saved decks from localStorage on component mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('savedDecks');
+      if (saved) {
+        const parsedDecks = JSON.parse(saved);
+        setSavedDecks(parsedDecks);
+        console.log(`[${APP_VERSION}] Loaded ${parsedDecks.length} saved decks from storage`);
+      }
+    } catch (err) {
+      console.error(`[${APP_VERSION}] Error loading saved decks:`, err);
+    }
+    
+    deckRefIntervalRef.current = setInterval(() => {
+      if (!loading) { 
+        refreshDecksList(false); 
+      }
+    }, 10000); 
+    
+    return () => {
+      if (deckRefIntervalRef.current) {
+        clearInterval(deckRefIntervalRef.current);
+      }
+    };
+  }, []);
 
   // Generate PIN and create session on component mount
   useEffect(() => {
@@ -310,18 +396,25 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 
       const createSession = async () => {
         try {
-          const newSession = await safeRoomOperation(() =>
-            room.collection('session').create({
+          reportStatus('ConductorView', 'Creating new session', { pin: generatedPin });
+          const newSession = await safeRoomOperation(
+            () => room.collection('session').create({
               pin: generatedPin,
               mode: mode,
               min_time: minTime,
               max_time: maxTime,
               is_playing: false,
               is_ending: false,
-            })
+              created_at: new Date().toISOString(), 
+              app_version: APP_VERSION 
+            }),
+            5, 
+            15000 
           );
           setSessionData(newSession);
-          console.log(`[${APP_VERSION}] Created session with PIN:`, generatedPin);
+          reportStatus('ConductorView', 'Created session successfully', { pin: generatedPin, id: newSession?.id });
+          
+          setTimeout(() => refreshDecksList(true), 1000);
         } catch (err) {
           const errorMsg = logError('Failed to create session', err);
           setError('Failed to create session. Please try again.');
@@ -330,13 +423,14 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 
       createSession();
     } else {
-      // If we already have session data, use it
       setPin(sessionData.pin);
       setMode(sessionData.mode);
       setMinTime(sessionData.min_time);
       setMaxTime(sessionData.max_time);
       setIsPlaying(sessionData.is_playing);
       setIsEnding(sessionData.is_ending);
+      
+      setTimeout(() => refreshDecksList(true), 1000);
     }
   }, [sessionData]);
 
@@ -344,129 +438,171 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   useEffect(() => {
     if (pin) {
       const shareableUrl = `${window.baseUrl || window.location.origin + window.location.pathname}?pin=${pin}`;
-      console.log(`[${APP_VERSION}] Shareable link:`, shareableUrl);
+      reportStatus('ConductorView', 'Shareable link created', { url: shareableUrl });
     }
   }, [pin]);
 
-  // Subscribe to players in this session - FIXED: improved reliability
+  // Subscribe to players with ultra-reliability
   useEffect(() => {
     if (pin) {
-      const subscribeToPlayers = () => {
+      reportStatus('ConductorView', 'Setting up player subscription', { pin });
+      let unsubscribed = false;
+      let retryCount = 0;
+      let intervalId = null;
+      
+      const subscribeWithRetry = () => {
+        if (unsubscribed) return () => {};
+        
         try {
+          reportStatus('ConductorView', 'Subscribing to players', { pin, retryCount });
+          
           return room.collection('player')
             .filter({ session_pin: pin })
             .subscribe(playersList => {
-              console.log(`[${APP_VERSION}] Players updated:`, playersList?.length || 0);
+              if (unsubscribed) return;
+              
+              reportStatus('ConductorView', 'Players updated', { count: playersList?.length || 0 });
               setPlayers(playersList || []);
+              retryCount = 0; 
             });
         } catch (err) {
-          logError("Error subscribing to players", err);
-          // Retry subscription after a delay
-          setTimeout(subscribeToPlayers, 3000);
-          return () => {}; // Return empty unsubscribe function
+          logError(`Error subscribing to players (retry ${retryCount})`, err);
+          
+          if (!unsubscribed && retryCount < 10) {
+            retryCount++;
+            setTimeout(() => {
+              if (!unsubscribed) subscribeWithRetry();
+            }, Math.min(1000 * retryCount, 10000));
+          }
+          
+          return () => {};
         }
       };
       
-      return subscribeToPlayers();
-    }
-  }, [pin]);
-
-  // Force update player list periodically to ensure it's current
-  useEffect(() => {
-    if (pin) {
-      const interval = setInterval(async () => {
-        try {
-          const latestPlayers = await room.collection('player')
-            .filter({ session_pin: pin })
-            .getList();
-          
-          if (latestPlayers && latestPlayers.length > 0) {
-            setPlayers(latestPlayers);
-          }
-        } catch (err) {
-          logError("Failed to refresh player list", err);
-        }
-      }, 10000); // Refresh every 10 seconds
+      const unsubscribe = subscribeWithRetry();
       
-      return () => clearInterval(interval);
-    }
-  }, [pin]);
-
-  // FIXED: Improved deck subscription with recovery and debugging
-  useEffect(() => {
-    if (pin) {
-      let isSubscribed = false;
-      
-      const refreshDecks = async () => {
-        try {
-          setDebugInfo(prev => ({ ...prev, lastAction: 'Manual refresh of decks' }));
-          const decksList = await room.collection('deck')
-            .filter({ session_pin: pin })
-            .getList();
-          
-          if (decksList) {
-            console.log(`[${APP_VERSION}] Manually refreshed decks: ${decksList.length}`);
-            setDecks(decksList);
-            setDebugInfo(prev => ({ ...prev, decksCount: decksList.length }));
-            
-            if (decksList.length > 0 && !currentDeck) {
-              setCurrentDeck(decksList[0].id);
-            }
-          }
-          
-          setLastDeckRefresh(Date.now());
-        } catch (err) {
-          logError("Error refreshing decks", err);
-        }
-      };
-      
-      const setupSubscription = () => {
-        if (isSubscribed) return; // Prevent multiple subscriptions
+      intervalId = setInterval(async () => {
+        if (unsubscribed) return;
         
         try {
-          setDebugInfo(prev => ({ ...prev, lastAction: 'Setting up deck subscription' }));
-          
-          const unsubscribe = room.collection('deck')
+          reportStatus('ConductorView', 'Polling players (fallback)', { pin });
+          const polledPlayers = await room.collection('player')
             .filter({ session_pin: pin })
-            .subscribe(decksList => {
-              console.log(`[${APP_VERSION}] Decks subscription update:`, decksList?.length || 0);
-              
-              if (decksList) {
-                setDecks(decksList);
-                setDebugInfo(prev => ({ ...prev, decksCount: decksList.length }));
-                
-                if (decksList.length > 0 && !currentDeck) {
-                  setCurrentDeck(decksList[0].id);
-                }
-              }
-            });
+            .getList();
           
-          isSubscribed = true;
-          return unsubscribe;
+          if (polledPlayers && !unsubscribed) {
+            setPlayers(polledPlayers);
+          }
         } catch (err) {
-          logError("Error subscribing to decks", err);
-          isSubscribed = false;
-          
-          // Retry subscription after a delay
-          setTimeout(setupSubscription, 3000);
-          return () => {}; // Return empty unsubscribe function
+          logError('Player polling fallback failed', err);
         }
-      };
-      
-      // Initial subscription setup
-      const unsubscribe = setupSubscription();
-      
-      // Periodic refresh as a fallback
-      const refreshInterval = setInterval(refreshDecks, 30000); // Every 30 seconds
-      
-      // Force a refresh 2 seconds after mounting to ensure we have data
-      setTimeout(refreshDecks, 2000);
-      
+      }, 8000); 
+
       return () => {
+        unsubscribed = true;
         if (typeof unsubscribe === 'function') {
           unsubscribe();
         }
-        clearInterval(refreshInterval);
+        if (intervalId) {
+          clearInterval(intervalId);
+        }
+      };
+    }
+  }, [pin]);
+
+  // Ultra-reliable deck subscription with fallbacks
+  useEffect(() => {
+    if (pin) {
+      reportStatus('ConductorView', 'Setting up deck subscription', { pin });
+      let unsubscribed = false;
+      let retryCount = 0;
+      let intervalId = null;
+      
+      const subscribeWithRetry = () => {
+        if (unsubscribed) return () => {};
+        
+        try {
+          reportStatus('ConductorView', 'Subscribing to decks', { pin, retryCount });
+          
+          return room.collection('deck')
+            .filter({ session_pin: pin })
+            .subscribe(decksList => {
+              if (unsubscribed) return;
+              
+              reportStatus('ConductorView', 'Decks updated via subscription', { 
+                count: decksList?.length || 0,
+                received: new Date().toISOString()
+              });
+              
+              const enhancedDecks = (decksList || []).map(deck => ({
+                ...deck,
+                _received: new Date().toISOString()
+              }));
+              
+              setDecks(enhancedDecks);
+              
+              if (enhancedDecks.length > 0 && !currentDeck) {
+                setCurrentDeck(enhancedDecks[0].id);
+              }
+              
+              retryCount = 0; 
+            });
+        } catch (err) {
+          logError(`Error subscribing to decks (retry ${retryCount})`, err);
+          
+          if (!unsubscribed && retryCount < 10) {
+            retryCount++;
+            setTimeout(() => {
+              if (!unsubscribed) subscribeWithRetry();
+            }, Math.min(1000 * retryCount, 10000));
+          }
+          
+          return () => {};
+        }
+      };
+      
+      const unsubscribe = subscribeWithRetry();
+      
+      intervalId = setInterval(async () => {
+        if (unsubscribed) return;
+        
+        try {
+          reportStatus('ConductorView', 'Polling decks (fallback)', { pin });
+          const polledDecks = await room.collection('deck')
+            .filter({ session_pin: pin })
+            .getList();
+          
+          if (polledDecks && !unsubscribed) {
+            reportStatus('ConductorView', 'Decks updated via polling', { 
+              count: polledDecks.length 
+            });
+            
+            const enhancedDecks = polledDecks.map(deck => ({
+              ...deck,
+              _received: new Date().toISOString()
+            }));
+            
+            setDecks(enhancedDecks);
+            
+            if (enhancedDecks.length > 0 && !currentDeck) {
+              setCurrentDeck(enhancedDecks[0].id);
+            }
+          }
+        } catch (err) {
+          logError('Deck polling fallback failed', err);
+        }
+      }, 10000); 
+
+      setTimeout(refreshDecksList, 2000);
+      
+      return () => {
+        unsubscribed = true;
+        if (typeof unsubscribe === 'function') {
+          unsubscribe();
+        }
+        if (intervalId) {
+          clearInterval(intervalId);
+        }
       };
     }
   }, [pin]);
@@ -483,6 +619,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
               max_time: maxTime,
               is_playing: isPlaying,
               is_ending: isEnding,
+              last_updated: new Date().toISOString() 
             })
           );
         } catch (err) {
@@ -494,434 +631,367 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     updateSession();
   }, [mode, minTime, maxTime, isPlaying, isEnding, sessionData]);
 
-  // Timer to check and update player cards
-  useEffect(() => {
-    if (isPlaying && decks.length > 0) {
-      const interval = setInterval(() => {
-        const now = new Date().getTime();
-
-        players.forEach(async player => {
-          if (player.expires_at && new Date(player.expires_at).getTime() <= now) {
-            // Card expired, assign a new card
-            assignNewCard(player);
-          } else if (!player.current_card) {
-            // Player doesn't have a card yet, assign one
-            assignNewCard(player);
-          }
-        });
-      }, 1000);
-
-      return () => clearInterval(interval);
-    }
-  }, [isPlaying, players, decks, mode, currentDeck, minTime, maxTime, isEnding]);
-
-  const assignNewCard = async (player) => {
-    if (isEnding) {
-      // If ending, don't assign new cards
-      try {
-        await safeRoomOperation(() =>
-          room.collection('player').update(player.id, {
-            current_card: 'END',
-            expires_at: null,
-          })
-        );
-      } catch (err) {
-        logError('Failed to update player', err);
-      }
-      return;
+  // COMPLETELY REDESIGNED: Simple, direct deck creation
+  const createDeck = async (name, cardsText) => {
+    if (!name.trim()) {
+      setError('Please enter a deck name');
+      return false;
     }
 
-    if (decks.length === 0) {
-      console.error('No decks available');
-      return;
-    }
-
-    let card = null;
-    let selectedDeck = null;
-
-    // Select deck based on mode
-    if (mode === 'unison' || mode === 'unique') {
-      // For unison and unique, use the current deck
-      selectedDeck = decks.find(d => d.id === currentDeck);
-      if (!selectedDeck && decks.length > 0) {
-        selectedDeck = decks[0];
-        setCurrentDeck(decks[0].id);
-      }
-    } else if (mode === 'random') {
-      // For random, select a random deck
-      selectedDeck = decks[Math.floor(Math.random() * decks.length)];
-    }
-
-    if (!selectedDeck || !selectedDeck.cards || selectedDeck.cards.length === 0) {
-      console.error('Selected deck has no cards');
-      return; // No cards available
-    }
-
-    // Select card based on mode
-    if (mode === 'unison') {
-      // Same card for everyone
-      // Find a card that's already assigned to someone else, or pick a new one
-      const assignedPlayer = players.find(p => p.current_card && p.current_card !== 'END' && p.id !== player.id);
-      if (assignedPlayer) {
-        card = assignedPlayer.current_card;
-      } else {
-        // No one has a card yet, pick a random one
-        card = selectedDeck.cards[Math.floor(Math.random() * selectedDeck.cards.length)];
-      }
+    let cards = [];
+    if (typeof cardsText === 'string') {
+      cards = cardsText
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0);
+    } else if (Array.isArray(cardsText)) {
+      cards = cardsText.filter(card => card && typeof card === 'string' && card.trim().length > 0);
     } else {
-      // For unique and random, pick a random card from the selected deck
-      // Try to avoid giving the same card to multiple players
-      const assignedCards = players
-        .filter(p => p.current_card && p.current_card !== 'END')
-        .map(p => p.current_card);
-
-      const availableCards = selectedDeck.cards.filter(c => !assignedCards.includes(c));
-
-      if (availableCards.length > 0) {
-        card = availableCards[Math.floor(Math.random() * availableCards.length)];
-      } else {
-        // All cards are assigned, pick any random card
-        card = selectedDeck.cards[Math.floor(Math.random() * selectedDeck.cards.length)];
-      }
+      setError('Invalid card format');
+      return false;
     }
 
-    // Calculate random duration between min and max time
-    const durationMs = (Math.floor(Math.random() * (maxTime - minTime + 1)) + minTime) * 1000;
-    const expiresAt = new Date(Date.now() + durationMs).toISOString();
-
-    // Update player
-    try {
-      await safeRoomOperation(() =>
-        room.collection('player').update(player.id, {
-          current_card: card,
-          expires_at: expiresAt,
-        })
-      );
-    } catch (err) {
-      logError('Failed to update player', err);
+    if (cards.length === 0) {
+      setError('No valid cards found. Please add at least one card.');
+      return false;
     }
-  };
-
-  const handlePlay = () => {
-    if (decks.length === 0) {
-      alert('Please upload at least one deck before starting');
-      return;
-    }
-    setIsPlaying(true);
-    setIsEnding(false);
-  };
-
-  const handleEnd = () => {
-    setIsEnding(true);
-  };
-
-  const handleStop = () => {
-    setIsPlaying(false);
-    setIsEnding(false);
-
-    // Reset all players' cards
-    players.forEach(async player => {
-      try {
-        await safeRoomOperation(() =>
-          room.collection('player').update(player.id, {
-            current_card: null,
-            expires_at: null,
-          })
-        );
-      } catch (err) {
-        logError('Failed to update player', err);
-      }
-    });
-  };
-
-  // ENHANCED & FIXED: Ultra-simplified file upload for maximum compatibility
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
 
     setLoading(true);
     setError(null);
-    setUploadProgress(0);
-    setDeckCreationStatus('Reading file...');
-    setDebugInfo(prev => ({ ...prev, lastAction: 'Starting file upload' }));
-
+    setDeckCreationStatus(`Creating deck "${name}" with ${cards.length} cards...`);
+    
+    const opId = Date.now() + Math.random().toString(36).substr(2, 5);
+    setDeckOperationId(opId);
+    
     try {
-      // Reduced size limit for better compatibility across all servers
-      const MAX_FILE_SIZE = 100 * 1024; // 100KB for ultra compatibility
-      if (file.size > MAX_FILE_SIZE) {
-        alert('File is too large (max 100KB). Please split into smaller files.');
-        setLoading(false);
-        setFileInput('');
-        return;
-      }
-
-      // Simple file reading - no chunks to minimize complexity
-      const reader = new FileReader();
+      let newDeck = null;
+      let retryCount = 0;
+      const maxRetries = 3;
       
-      reader.onload = async (e) => {
+      while (retryCount < maxRetries && !newDeck) {
         try {
-          setDeckCreationStatus('Parsing JSON...');
-          const content = e.target.result;
-          let data;
+          const deckData = {
+            session_pin: pin,
+            name: name,
+            cards: cards,
+            created_at: new Date().toISOString(),
+            version: APP_VERSION,
+            client_id: opId 
+          };
           
-          try {
-            data = JSON.parse(content);
-          } catch (jsonErr) {
-            throw new Error('Failed to parse JSON: ' + jsonErr.message);
-          }
+          reportStatus('ConductorView', `Creating deck attempt ${retryCount + 1}`, {
+            deck_name: name,
+            cards_count: cards.length,
+            op_id: opId
+          });
           
-          // SIMPLIFIED: Process data with minimal computation
-          if (Array.isArray(data)) {
-            // Simple array of strings
-            setDeckCreationStatus('Processing simple array...');
-            await createMicroDeck(file.name.replace('.json', ''), data);
-          } else if (data.cards && Array.isArray(data.cards)) {
-            // Single deck format
-            setDeckCreationStatus('Processing single deck...');
-            await createMicroDeck(data.name || file.name.replace('.json', ''), data.cards);
-          } else if (data.decks && Array.isArray(data.decks)) {
-            // Multiple decks format - process one by one with delays
-            const totalDecks = data.decks.length;
-            setDeckCreationStatus(`Processing ${totalDecks} decks (this may take a while)...`);
-            
-            for (let i = 0; i < totalDecks; i++) {
-              const deck = data.decks[i];
-              setDeckCreationStatus(`Processing deck ${i+1}/${totalDecks}`);
-              
-              if (deck.name && Array.isArray(deck.cards)) {
-                try {
-                  await createMicroDeck(deck.name, deck.cards);
-                  // Add delay between decks
-                  if (i < totalDecks - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 1500));
-                  }
-                } catch (deckErr) {
-                  console.error(`Error with deck ${i+1}:`, deckErr);
-                  // Continue with next deck
-                }
-              }
-            }
-          } else {
-            throw new Error('Invalid JSON format. Expected array of strings or object with cards array.');
-          }
+          newDeck = await room.collection('deck').create(deckData);
           
-          // Force refresh decks at the end
-          await refreshDecksList();
-          
-          setDeckCreationStatus('Upload complete!');
-          setTimeout(() => setDeckCreationStatus(''), 3000);
+          reportStatus('ConductorView', 'Deck created successfully', {
+            deck_id: newDeck.id,
+            op_id: opId
+          });
         } catch (err) {
-          const errorMsg = logError('Failed to process JSON', err);
-          setError('Error processing file: ' + errorMsg);
-          setDeckCreationStatus('Error: ' + errorMsg);
+          console.error(`[${APP_VERSION}] Deck creation error (attempt ${retryCount + 1}):`, err);
+          retryCount++;
+          
+          if (retryCount < maxRetries) {
+            setDeckCreationStatus(`Retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+            await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+          } else {
+            throw new Error(`Failed after ${maxRetries} attempts: ${err.message}`);
+          }
         }
+      }
+      
+      if (!newDeck) {
+        throw new Error('Could not create deck after multiple attempts');
+      }
+      
+      setDecks(prevDecks => {
+        const deckWithMeta = {
+          ...newDeck,
+          _localAdded: new Date().toISOString(),
+          _opId: opId
+        };
         
-        setLoading(false);
-        setUploadProgress(0);
-      };
+        const updatedDecks = [...prevDecks, deckWithMeta];
+        console.log(`[${APP_VERSION}] Updated decks array locally:`, updatedDecks.length);
+        return updatedDecks;
+      });
       
-      reader.onerror = function(err) {
-        const errorMsg = logError('Error reading file', err);
-        setError('Error reading file: ' + errorMsg);
-        setLoading(false);
-        setUploadProgress(0);
-      };
-      
-      reader.readAsText(file);
-    } catch (err) {
-      const errorMsg = logError('File upload failed', err);
-      setError('Upload failed: ' + errorMsg);
-      setLoading(false);
-      setUploadProgress(0);
-    }
-    
-    setFileInput('');
-  };
-
-  // ADDED: Ultra-tiny deck creation function (micro-batched for reliability)
-  const createMicroDeck = async (name, cards) => {
-    if (!name || !cards || !Array.isArray(cards) || cards.length === 0) {
-      throw new Error("Invalid deck data");
-    }
-    
-    // Clean and limit cards to prevent payload issues
-    const validCards = cards
-      .filter(card => card && typeof card === 'string' && card.trim().length > 0)
-      .map(card => card.substring(0, 80).trim()); // Limit to 80 chars
-    
-    if (validCards.length === 0) {
-      throw new Error("No valid cards found in deck");
-    }
-    
-    // Make name unique to avoid conflicts
-    const randomId = Math.random().toString(36).substring(2, 7);
-    const safeName = `${name.substring(0, 12)}_${randomId}`;
-    
-    // Ultra-micro batching: Create deck with very few cards per batch
-    const MICRO_BATCH_SIZE = 3; // Just 3 cards per batch for ultra reliability
-    const batches = [];
-    
-    // Split into tiny batches
-    for (let i = 0; i < validCards.length; i += MICRO_BATCH_SIZE) {
-      batches.push(validCards.slice(i, i + MICRO_BATCH_SIZE));
-    }
-    
-    const batchCount = batches.length;
-    
-    // Create first batch with initial deck
-    try {
-      const initialCards = batches[0];
-      const deckName = batchCount > 1 ? `${safeName} (1/${batchCount})` : safeName;
-      
-      const newDeck = await safeRoomOperation(() =>
-        room.collection('deck').create({
-          session_pin: pin,
-          name: deckName,
-          cards: initialCards,
-          created_at: new Date().toISOString()
-        })
-      );
-      
-      console.log(`[${APP_VERSION}] Created initial deck batch: ${newDeck?.id}`);
-      
-      // If no currentDeck is selected, select this one
       if (!currentDeck) {
         setCurrentDeck(newDeck.id);
       }
       
-      // If only one batch, we're done
-      if (batchCount === 1) {
-        return newDeck;
-      }
+      setDeckCreationStatus(`Success! "${name}" deck added with ${cards.length} cards`);
       
-      // Process remaining batches
-      for (let i = 1; i < batchCount; i++) {
-        const batchName = `${safeName} (${i+1}/${batchCount})`;
-        setDeckCreationStatus(`Creating batch ${i+1}/${batchCount}`);
-        
-        try {
-          const batchDeck = await safeRoomOperation(() =>
-            room.collection('deck').create({
-              session_pin: pin,
-              name: batchName,
-              cards: batches[i],
-              created_at: new Date().toISOString()
-            })
-          );
-          
-          console.log(`[${APP_VERSION}] Created deck batch ${i+1}: ${batchDeck?.id}`);
-          
-          // Add delay between batches
-          if (i < batchCount - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1000)); 
-          }
-        } catch (batchErr) {
-          console.error(`Error with batch ${i+1}:`, batchErr);
-          // Continue with next batch despite errors
-        }
-      }
+      setTimeout(() => refreshDecksList(true), 500);
+      setTimeout(() => refreshDecksList(true), 2000);
+      setTimeout(() => refreshDecksList(true), 5000);
       
-      return newDeck; // Return the first deck
+      return true;
     } catch (err) {
-      throw new Error(`Failed to create deck: ${err.message}`);
+      console.error(`[${APP_VERSION}] Final deck creation error:`, err);
+      setError(`Failed to create deck: ${err.message || 'Unknown error'}`);
+      setDeckCreationStatus('Error creating deck. Please try again.');
+      return false;
+    } finally {
+      setLoading(false);
     }
   };
 
-  // ENHANCED: Improved text submission for reliability
-  const handleTextSubmit = async () => {
-    if (!textInput.trim() || !deckName.trim()) {
-      alert('Please enter both deck name and cards');
-      return;
-    }
-
-    // Pre-process cards
-    const cards = textInput.split('\n')
-      .map(line => line.trim())
-      .filter(line => line.length > 0);
-      
-    if (cards.length === 0) {
-      alert('No valid cards found');
-      return;
-    }
-
-    // Reduced limit for better server compatibility
-    if (cards.length > 15) {
-      alert('Too many cards (max 15). Please split into multiple smaller decks.');
-      return;
-    }
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
     setLoading(true);
     setError(null);
-    setDeckCreationStatus('Processing text input...');
+    setDeckCreationStatus('Reading file...');
     
     try {
-      // Use the micro-deck creation for maximum reliability
-      await createMicroDeck(deckName, cards);
+      const fileContent = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.onerror = (err) => reject(new Error('Failed to read file'));
+        reader.readAsText(file);
+      });
       
-      // Force a refresh of decks
-      await refreshDecksList();
+      setDeckCreationStatus('Parsing file content...');
       
-      setTextInput('');
-      setDeckName('');
-      setDeckCreationStatus('Deck created successfully!');
-      setTimeout(() => setDeckCreationStatus(''), 3000);
+      let data;
+      try {
+        data = JSON.parse(fileContent);
+      } catch (jsonErr) {
+        setDeckCreationStatus('Error: Not a valid JSON file');
+        throw new Error(`Invalid JSON format: ${jsonErr.message}`);
+      }
+      
+      let successCount = 0;
+      
+      if (Array.isArray(data)) {
+        setDeckCreationStatus(`Creating deck from array with ${data.length} cards...`);
+        const success = await createDeck(file.name.replace(/\.[^/.]+$/, ""), data);
+        if (success) successCount++;
+      } 
+      else if (data.cards && Array.isArray(data.cards)) {
+        setDeckCreationStatus(`Creating deck "${data.name || file.name}"...`);
+        const success = await createDeck(data.name || file.name.replace(/\.[^/.]+$/, ""), data.cards);
+        if (success) successCount++;
+      }
+      else if (data.decks && Array.isArray(data.decks)) {
+        setDeckCreationStatus(`Processing ${data.decks.length} decks...`);
+        
+        for (let i = 0; i < data.decks.length; i++) {
+          const deck = data.decks[i];
+          if (!deck.name || !Array.isArray(deck.cards)) {
+            console.warn(`[${APP_VERSION}] Skipping invalid deck at position ${i}`);
+            continue;
+          }
+          
+          setDeckCreationStatus(`Creating deck ${i+1}/${data.decks.length}: "${deck.name}"`);
+          const success = await createDeck(deck.name, deck.cards);
+          if (success) successCount++;
+          
+          if (i < data.decks.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+      }
+      else {
+        throw new Error("Unsupported JSON format. Expected array of cards or object with cards/decks property.");
+      }
+      
+      setDeckCreationStatus(`Upload complete! Added ${successCount} deck${successCount !== 1 ? 's' : ''}.`);
+      
+      setTimeout(() => refreshDecksList(true), 1000);
+      setTimeout(() => refreshDecksList(true), 3000);
     } catch (err) {
-      const errorMsg = logError('Failed to add deck', err);
-      setError('Failed to add deck: ' + errorMsg);
-      setDeckCreationStatus('Error: ' + errorMsg);
+      console.error(`[${APP_VERSION}] File upload error:`, err);
+      setError('Upload error: ' + (err.message || 'Unknown error'));
+      setDeckCreationStatus('Error: ' + (err.message || 'Unknown error'));
+    } finally {
+      setLoading(false);
+      setFileInput(''); 
     }
-    
-    setLoading(false);
   };
 
-  // ENHANCED: More aggressive deck refresh with explicit feedback
-  const refreshDecksList = async () => {
-    setDebugInfo(prev => ({ ...prev, lastAction: 'Manual refresh requested' }));
-    setDeckCreationStatus('Refreshing decks...');
+  const handleTextSubmit = async () => {
+    if (!textInput.trim()) {
+      setError('Please enter at least one card');
+      return;
+    }
+    
+    if (!deckName.trim()) {
+      setError('Please enter a deck name');
+      return;
+    }
+
+    const success = await createDeck(deckName, textInput);
+    
+    if (success) {
+      setTextInput('');
+      setDeckName('');
+      setTimeout(() => refreshDecksList(true), 1000);
+      setTimeout(() => refreshDecksList(true), 3000);
+    }
+  };
+
+  const refreshDecksList = async (showFeedback = true) => {
+    const refreshId = Date.now();
+    setLastDeckRefresh(refreshId);
+    
+    if (showFeedback) {
+      setManualRefreshCount(prev => prev + 1);
+      setDeckCreationStatus('Refreshing deck list...');
+    }
     
     try {
-      // Try multiple times with increasing delays
-      let success = false;
-      let attempts = 0;
-      let refreshedDecks = [];
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Refresh timed out')), 8000)
+      );
       
-      while (!success && attempts < 3) {
-        try {
-          refreshedDecks = await room.collection('deck')
-            .filter({ session_pin: pin })
-            .getList();
-            
-          if (refreshedDecks) {
-            success = true;
-          }
-        } catch (err) {
-          attempts++;
-          await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
-        }
-      }
+      const fetchPromise = room.collection('deck')
+        .filter({ session_pin: pin })
+        .getList();
       
-      if (success && refreshedDecks) {
-        console.log(`[${APP_VERSION}] Deck refresh success:`, refreshedDecks.length);
-        setDecks(refreshedDecks);
-        setDebugInfo(prev => ({ ...prev, decksCount: refreshedDecks.length }));
+      const fetchedDecks = await Promise.race([fetchPromise, timeoutPromise]);
+      
+      if (fetchedDecks && Array.isArray(fetchedDecks)) {
+        reportStatus('ConductorView', 'Refreshed decks list', {
+          count: fetchedDecks.length,
+          refresh_id: refreshId,
+          manual: showFeedback
+        });
         
-        if (refreshedDecks.length > 0 && !currentDeck) {
-          setCurrentDeck(refreshedDecks[0].id);
+        const enhancedDecks = fetchedDecks.map(deck => ({
+          ...deck,
+          _refreshed: new Date().toISOString(),
+          _refreshId: refreshId
+        }));
+        
+        setDecks(enhancedDecks);
+        
+        if (enhancedDecks.length > 0 && !currentDeck) {
+          setCurrentDeck(enhancedDecks[0].id);
         }
         
-        setDeckCreationStatus(`Found ${refreshedDecks.length} decks`);
-        setTimeout(() => setDeckCreationStatus(''), 3000);
+        if (showFeedback) {
+          setDeckCreationStatus(`Found ${enhancedDecks.length} deck${enhancedDecks.length !== 1 ? 's' : ''}`);
+          setTimeout(() => setDeckCreationStatus(''), 3000);
+        }
       } else {
-        setDeckCreationStatus('Refresh failed. Try again.');
-        setTimeout(() => setDeckCreationStatus(''), 3000);
+        throw new Error('Invalid response from server');
+      }
+    } catch (err) {
+      console.error(`[${APP_VERSION}] Deck refresh error:`, err);
+      
+      if (showFeedback) {
+        setDeckCreationStatus(`Could not refresh from server. Using local data.`);
+      }
+      // We continue using the decks we have in state
+    }
+  };
+
+  const saveDeck = (deck) => {
+    try {
+      const exists = savedDecks.some(saved => 
+        saved.name === deck.name && 
+        JSON.stringify(saved.cards) === JSON.stringify(deck.cards)
+      );
+      
+      if (exists) {
+        setDeckCreationStatus(`Deck "${deck.name}" is already saved`);
+        return;
       }
       
-      setLastDeckRefresh(Date.now());
+      const deckToSave = {
+        name: deck.name,
+        cards: deck.cards,
+        saved_at: new Date().toISOString()
+      };
+      
+      const updatedSavedDecks = [...savedDecks, deckToSave];
+      setSavedDecks(updatedSavedDecks);
+      
+      localStorage.setItem('savedDecks', JSON.stringify(updatedSavedDecks));
+      
+      setDeckCreationStatus(`Deck "${deck.name}" saved for future use`);
+      setTimeout(() => setDeckCreationStatus(''), 3000);
     } catch (err) {
-      const errorMsg = logError("Error refreshing decks", err);
-      setDeckCreationStatus('Refresh error: ' + errorMsg);
-      setTimeout(() => setDeckCreationStatus(''), 5000);
+      console.error(`[${APP_VERSION}] Error saving deck:`, err);
+      setDeckCreationStatus(`Could not save deck: ${err.message || 'Unknown error'}`);
     }
+  };
+
+  const loadSavedDeck = async (savedDeck) => {
+    setDeckCreationStatus(`Loading deck "${savedDeck.name}"...`);
+    
+    const success = await createDeck(savedDeck.name, savedDeck.cards);
+    
+    if (success) {
+      setShowSavedDecks(false);
+      setDeckCreationStatus(`Deck "${savedDeck.name}" loaded successfully`);
+      setTimeout(() => refreshDecksList(true), 1000);
+      setTimeout(() => refreshDecksList(true), 3000);
+    }
+  };
+
+  const removeSavedDeck = (index) => {
+    try {
+      const updatedDecks = savedDecks.filter((_, i) => i !== index);
+      setSavedDecks(updatedDecks);
+      localStorage.setItem('savedDecks', JSON.stringify(updatedDecks));
+      setDeckCreationStatus('Saved deck removed');
+      setTimeout(() => setDeckCreationStatus(''), 2000);
+    } catch (err) {
+      console.error(`[${APP_VERSION}] Error removing saved deck:`, err);
+    }
+  };
+
+  const handleDownloadDecks = () => {
+    try {
+      if (decks.length === 0) {
+        setError('No decks to download');
+        return;
+      }
+      
+      const exportData = {
+        app_version: APP_VERSION,
+        exported_at: new Date().toISOString(),
+        decks: decks.map(deck => ({
+          name: deck.name,
+          cards: deck.cards || []
+        }))
+      };
+      
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `improv_decks_${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 100);
+      
+      setDeckCreationStatus(`Downloaded ${decks.length} deck${decks.length !== 1 ? 's' : ''}`);
+      setTimeout(() => setDeckCreationStatus(''), 3000);
+    } catch (err) {
+      console.error(`[${APP_VERSION}] Download error:`, err);
+      setError(`Download failed: ${err.message || 'Unknown error'}`);
+    }
+  };
+
+  const resetErrorState = () => {
+    setError(null);
+    setLoading(false);
+    setDeckCreationStatus('Error state cleared');
+    setTimeout(() => setDeckCreationStatus(''), 2000);
   };
 
   return (
@@ -945,41 +1015,14 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       </div>
 
       <div className="card">
-        <h2 className="header">Upload Decks</h2>
-
+        <h2 className="header">Deck Management</h2>
+        
         <div className="mb-4">
-          <h3>Upload JSON File</h3>
-          <input
-            type="file"
-            accept=".json"
-            onChange={handleFileUpload}
-            value={fileInput}
-            disabled={loading}
-          />
-          <p className="helper-text">Accepts single deck (array of strings), deck object {`{ name, cards }`}, or multiple decks {`{ decks: [{ name, cards }] }`}</p>
-          {loading && (
-            <div style={{ marginTop: '10px' }}>
-              <div style={{ width: '100%', backgroundColor: '#eee', borderRadius: '4px', overflow: 'hidden' }}>
-                <div 
-                  style={{
-                    width: '100%', 
-                    backgroundColor: 'black', 
-                    height: '10px', 
-                    animation: 'progress-bar 1.5s infinite'
-                  }}
-                ></div>
-              </div>
-              <p>Status: {deckCreationStatus || 'Processing...'}</p>
-            </div>
-          )}
-        </div>
-
-        <div className="mb-4">
-          <h3>Or Paste Cards (one per line)</h3>
+          <h3>Create a New Deck</h3>
           <input
             type="text"
             className="input"
-            placeholder="Deck Name"
+            placeholder="Deck Name (required)"
             value={deckName}
             onChange={(e) => setDeckName(e.target.value)}
             disabled={loading}
@@ -987,158 +1030,388 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           <textarea
             className="input"
             rows="5"
-            placeholder="Card 1&#10;Card 2&#10;Card 3"
+            placeholder="Enter cards, one per line:&#10;Card 1&#10;Card 2&#10;Card 3"
             value={textInput}
             onChange={(e) => setTextInput(e.target.value)}
             disabled={loading}
           ></textarea>
           <button 
-            className={`btn ${loading ? 'btn-disabled' : ''}`} 
+            className={`btn btn-primary ${loading ? 'btn-disabled' : ''}`} 
             onClick={handleTextSubmit}
             disabled={loading}
           >
-            {loading ? 'Adding...' : 'Add Deck'}
+            {loading ? 'Creating...' : 'Add Deck'}
           </button>
-          {deckCreationStatus && <p style={{ marginTop: '5px' }}>{deckCreationStatus}</p>}
+          {deckCreationStatus && (
+            <div className="helper-text" style={{ marginTop: '10px', fontWeight: 'bold' }}>
+              {deckCreationStatus}
+            </div>
+          )}
         </div>
-
-        {error && <p style={{ color: 'red', marginBottom: '10px' }}>{error}</p>}
-
+        
+        <div className="mb-4">
+          <h3>Or Upload JSON File</h3>
+          <input
+            type="file"
+            accept=".json"
+            onChange={handleFileUpload}
+            value={fileInput}
+            disabled={loading}
+          />
+          <p className="helper-text">
+            Accepts: JSON array of strings, or objects with name/cards properties
+          </p>
+        </div>
+        
+        {loading && (
+          <div style={{ marginTop: '10px', marginBottom: '15px' }}>
+            <div style={{ width: '100%', backgroundColor: '#eee', borderRadius: '4px', overflow: 'hidden' }}>
+              <div 
+                style={{ 
+                  width: '50%', 
+                  height: '10px', 
+                  backgroundColor: 'black', 
+                  borderRadius: '4px',
+                  animation: 'progress-bar 1.5s infinite'
+                }}
+              ></div>
+            </div>
+          </div>
+        )}
+        
+        {error && (
+          <div style={{ color: 'red', marginBottom: '15px', padding: '10px', backgroundColor: '#ffeeee', borderRadius: '8px' }}>
+            <strong>Error:</strong> {error}
+            <div style={{ marginTop: '8px', textAlign: 'right' }}>
+              <button 
+                className="btn btn-small"
+                onClick={resetErrorState}
+                style={{ padding: '3px 8px', fontSize: '12px' }}
+              >
+                Clear Error
+              </button>
+            </div>
+          </div>
+        )}
+        
+        <div className="mb-4">
+          <button 
+            className="btn"
+            onClick={() => setShowSavedDecks(!showSavedDecks)}
+            style={{ marginBottom: '10px' }}
+          >
+            {showSavedDecks ? 'Hide Saved Decks' : `Show Saved Decks (${savedDecks.length})`}
+          </button>
+          
+          {showSavedDecks && (
+            <div style={{ maxHeight: '200px', overflowY: 'auto', border: '1px solid #ddd', borderRadius: '8px', padding: '10px' }}>
+              {savedDecks.length === 0 ? (
+                <p>No saved decks yet. Save decks to reuse them later.</p>
+              ) : (
+                savedDecks.map((deck, index) => (
+                  <div key={index} style={{ 
+                    display: 'flex', 
+                    justifyContent: 'space-between', 
+                    alignItems: 'center',
+                    padding: '8px',
+                    borderBottom: index < savedDecks.length - 1 ? '1px solid #eee' : 'none'
+                  }}>
+                    <div>
+                      <strong>{deck.name}</strong> ({deck.cards.length} cards)
+                    </div>
+                    <div>
+                      <button 
+                        className="btn"
+                        onClick={() => loadSavedDeck(deck)}
+                        style={{ 
+                          marginRight: '5px', 
+                          padding: '5px 10px',
+                          backgroundColor: '#000',
+                          color: '#fff'
+                        }}
+                        disabled={loading}
+                      >
+                        Load
+                      </button>
+                      <button 
+                        className="btn"
+                        onClick={() => removeSavedDeck(index)}
+                        style={{ padding: '5px 10px' }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+        
         <div>
-          <h3>Available Decks ({decks.length})</h3>
-          <div style={{ marginBottom: '10px' }}>
+          <h3>Available Decks for This Session ({decks.length})</h3>
+          <div style={{ display: 'flex', gap: '10px', marginBottom: '15px', flexWrap: 'wrap' }}>
             <button 
               className="btn" 
-              onClick={refreshDecksList}
+              onClick={() => refreshDecksList(true)}
               disabled={loading}
-              style={{ marginRight: '10px', backgroundColor: '#000', color: '#fff' }}
+              style={{ backgroundColor: '#000', color: '#fff' }}
             >
-              Force Refresh Decks List
+              <span style={{ marginRight: '5px' }}>↻</span> Refresh Decks
             </button>
-            <span style={{ fontSize: '12px', color: '#888' }}>
-              Last refreshed: {lastDeckRefresh ? new Date(lastDeckRefresh).toLocaleTimeString() : 'never'}
-            </span>
+            
+            <button 
+              className={`btn ${decks.length === 0 ? 'btn-disabled' : ''}`}
+              onClick={handleDownloadDecks}
+              disabled={decks.length === 0 || loading}
+            >
+              Download All Decks
+            </button>
           </div>
           
           {decks.length === 0 ? (
-            <div>
-              <p>No decks uploaded yet</p>
-              <p className="helper-text" style={{color: 'red'}}>
-                If you've uploaded decks but don't see them, try clicking "Force Refresh Decks List"
+            <div style={{ padding: '15px', backgroundColor: '#f8f8f8', borderRadius: '8px', marginBottom: '15px' }}>
+              <p>No decks available for this session yet</p>
+              <p style={{ fontSize: '14px', marginTop: '5px' }}>
+                Create a deck above or upload a JSON file
               </p>
             </div>
           ) : (
-            <>
-              <select 
-                className="input" 
-                value={currentDeck || ''}
-                onChange={(e) => setCurrentDeck(e.target.value)}
-              >
-                {decks.map(deck => (
-                  <option key={deck.id} value={deck.id}>
-                    {deck.name} ({deck.cards?.length || 0} cards)
-                  </option>
+            <div style={{ marginBottom: '15px' }}>
+              <div style={{ 
+                maxHeight: '250px', 
+                overflowY: 'auto', 
+                border: '1px solid #ddd', 
+                borderRadius: '8px' 
+              }}>
+                {decks.map((deck, index) => (
+                  <div key={deck.id} style={{ 
+                    padding: '10px',
+                    backgroundColor: currentDeck === deck.id ? '#f0f0f0' : 'transparent',
+                    borderBottom: index < decks.length - 1 ? '1px solid #eee' : 'none',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center'
+                  }}>
+                    <div>
+                      <strong 
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => setCurrentDeck(deck.id)}
+                      >
+                        {deck.name}
+                      </strong>
+                      <div style={{ fontSize: '14px', color: '#666' }}>
+                        {deck.cards?.length || 0} cards
+                      </div>
+                    </div>
+                    <div>
+                      <button 
+                        className="btn"
+                        onClick={() => setCurrentDeck(deck.id)}
+                        style={{ 
+                          marginRight: '5px', 
+                          padding: '5px 10px',
+                          backgroundColor: currentDeck === deck.id ? '#000' : '#fff',
+                          color: currentDeck === deck.id ? '#fff' : '#000'
+                        }}
+                      >
+                        Select
+                      </button>
+                      <button 
+                        className="btn"
+                        onClick={() => saveDeck(deck)}
+                        style={{ padding: '5px 10px' }}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </div>
                 ))}
-              </select>
-              <button className="btn" onClick={downloadDecks} style={{ marginTop: '10px' }}>
-                Download All Decks as JSON
-              </button>
-            </>
+              </div>
+            </div>
           )}
-          
-          {/* Debug info */}
-          <div style={{ marginTop: '10px', fontSize: '12px', color: '#888', borderTop: '1px solid #eee', paddingTop: '10px' }}>
-            <details>
-              <summary>Debug Info</summary>
-              <p>Last action: {debugInfo.lastAction || 'None'}</p>
-              <p>Decks count (debug): {debugInfo.decksCount}</p>
-              <p>App version: {APP_VERSION}</p>
-            </details>
-          </div>
         </div>
       </div>
 
       <div className="card">
         <h2 className="header">Session Settings</h2>
-
+        
         <div className="mb-4">
-          <h3>Distribution Mode</h3>
-          <select
-            className="input"
-            value={mode}
+          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>
+            Card Distribution Mode:
+          </label>
+          <select 
+            className="input" 
+            value={mode} 
             onChange={(e) => setMode(e.target.value)}
+            disabled={isPlaying}
           >
-            <option value="unison">Unison - Everyone sees the same card</option>
-            <option value="unique">Unique - Different cards from same deck</option>
-            <option value="random">Random - Random cards from any deck</option>
+            <option value="unison">Unison - Give everyone the same card</option>
+            <option value="unique">Unique - Give everyone different cards</option>
+            <option value="random">Random - Mix of same and different cards</option>
           </select>
+          <p className="helper-text">
+            Choose how to distribute cards from the selected deck
+          </p>
         </div>
 
         <div className="mb-4">
-          <h3>Display Time (seconds)</h3>
-          <div className="flex gap-2">
-            <div>
-              <label>Min:</label>
+          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>
+            Card Display Duration (seconds):
+          </label>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <div style={{ width: '50%' }}>
+              <label>Min Time:</label>
               <input
                 type="number"
                 className="input"
-                min="20"
-                max="300"
                 value={minTime}
-                onChange={(e) => setMinTime(parseInt(e.target.value))}
+                onChange={(e) => setMinTime(Math.max(5, parseInt(e.target.value) || 5))}
+                min="5"
+                max="300"
+                disabled={isPlaying}
               />
             </div>
-            <div>
-              <label>Max:</label>
+            <div style={{ width: '50%' }}>
+              <label>Max Time:</label>
               <input
                 type="number"
                 className="input"
-                min="20"
-                max="300"
                 value={maxTime}
-                onChange={(e) => setMaxTime(parseInt(e.target.value))}
+                onChange={(e) => setMaxTime(Math.max(minTime, parseInt(e.target.value) || minTime))}
+                min={minTime}
+                max="300"
+                disabled={isPlaying}
               />
             </div>
           </div>
+          <p className="helper-text">
+            System will pick a random time between min and max for each card
+          </p>
         </div>
 
-        <div className="flex gap-2">
-          {!isPlaying ? (
+        <div style={{ marginTop: '20px' }}>
+          {isPlaying ? (
             <button 
-              className={`btn btn-primary ${decks.length === 0 ? 'btn-disabled' : ''}`}
-              onClick={handlePlay}
-              disabled={decks.length === 0}
+              className="btn btn-primary" 
+              onClick={() => setIsEnding(true)}
+              style={{ 
+                backgroundColor: '#ff3b30', 
+                borderColor: '#ff3b30',
+                marginRight: '10px'
+              }}
             >
-              Start
+              End Session
             </button>
           ) : (
-            <>
-              <button className="btn" onClick={handleStop}>Stop</button>
-              <button className="btn" onClick={handleEnd}>End Session</button>
-            </>
+            <button 
+              className={`btn btn-primary ${(!currentDeck || players.length === 0) ? 'btn-disabled' : ''}`}
+              onClick={() => setIsPlaying(true)}
+              disabled={!currentDeck || players.length === 0}
+              style={{ marginRight: '10px' }}
+            >
+              Start Session
+            </button>
           )}
+          
+          <button 
+            className="btn"
+            onClick={() => {
+              if (isPlaying) {
+                if (confirm('Are you sure you want to reset? This will stop the current session.')) {
+                  setIsPlaying(false);
+                  setIsEnding(false);
+                }
+              } else {
+                setIsPlaying(false);
+                setIsEnding(false);
+              }
+            }}
+          >
+            Reset Session
+          </button>
         </div>
+        
+        {(!currentDeck || players.length === 0) && !isPlaying && (
+          <div style={{ 
+            marginTop: '15px',
+            padding: '10px', 
+            backgroundColor: '#fff9db', 
+            borderRadius: '8px', 
+            fontSize: '14px' 
+          }}>
+            <strong>Note:</strong> You need at least one deck selected and one player joined to start the session.
+            {!currentDeck && decks.length > 0 && (
+              <div style={{marginTop: '5px'}}>
+                <button 
+                  className="btn btn-small"
+                  onClick={() => setCurrentDeck(decks[0].id)}
+                  style={{padding: '3px 8px', fontSize: '12px'}}
+                >
+                  Select First Deck
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="card">
         <h2 className="header">Players ({players.length}/10)</h2>
-
-        <div className="player-list">
-          {players.length === 0 ? (
-            <p>No players have joined yet</p>
-          ) : (
-            players.map(player => (
+        
+        {players.length === 0 ? (
+          <p>No players have joined yet. Share the PIN with players to join.</p>
+        ) : (
+          <div className="player-list">
+            {players.map((player) => (
               <div key={player.id} className="player-item">
                 <div>
                   <strong>{player.name}</strong>
-                  <div>{player.current_card === 'END' ? 'ENDED' : player.current_card || 'Waiting...'}</div>
+                  {player.current_card && (
+                    <span style={{ 
+                      marginLeft: '10px', 
+                      padding: '2px 6px', 
+                      backgroundColor: '#f0f0f0', 
+                      borderRadius: '4px',
+                      fontSize: '12px'
+                    }}>
+                      Has card
+                    </span>
+                  )}
                 </div>
                 <div>
-                  {player.expires_at ? `${getTimeLeft(player.expires_at)}s left` : ''}
+                  {player.expires_at && (
+                    <span style={{ fontSize: '14px' }}>
+                      {getTimeLeft(player.expires_at)}s
+                    </span>
+                  )}
                 </div>
               </div>
-            ))
-          )}
+            ))}
+          </div>
+        )}
+        
+        <div style={{ marginTop: '15px' }}>
+          <button 
+            className="btn"
+            onClick={async () => {
+              try {
+                const polledPlayers = await room.collection('player')
+                  .filter({ session_pin: pin })
+                  .getList();
+                
+                if (polledPlayers) {
+                  setPlayers(polledPlayers);
+                  alert(`Found ${polledPlayers.length} player(s)`);
+                }
+              } catch (err) {
+                console.error(`[${APP_VERSION}] Player refresh error:`, err);
+                alert('Error refreshing player list. Please try again.');
+              }
+            }}
+          >
+            Refresh Player List
+          </button>
         </div>
       </div>
 
@@ -1147,7 +1420,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   );
 }
 
-// Player View
+// Enhanced Player View with better countdown visualization
 function PlayerView({ pin, playerName, setView }) {
   const [currentCard, setCurrentCard] = useState(null);
   const [timeLeft, setTimeLeft] = useState(0);
@@ -1158,9 +1431,9 @@ function PlayerView({ pin, playerName, setView }) {
   const [loading, setLoading] = useState(true);
   const [retries, setRetries] = useState(0);
   const [connectionStatus, setConnectionStatus] = useState('connecting');
+  const [debugInfo, setDebugInfo] = useState({ lastAction: '', playerFound: false });
   const initialSetupDone = useRef(false);
 
-  // Find player record and subscribe to changes - FIXED: improved reliability
   useEffect(() => {
     if (initialSetupDone.current) return;
     
@@ -1168,141 +1441,157 @@ function PlayerView({ pin, playerName, setView }) {
       try {
         setLoading(true);
         setConnectionStatus('connecting');
-        console.log(`[${APP_VERSION}] Looking for player with pin:`, pin, 'and name:', playerName);
+        reportStatus('PlayerView', 'Setup initiated', { pin, name: playerName });
 
-        // Make sure session exists first
-        const sessions = await safeRoomOperation(() => 
-          room.collection('session').filter({ pin }).getList()
+        const sessions = await safeRoomOperation(
+          () => room.collection('session').filter({ pin }).getList(),
+          3,
+          12000
         );
         
         if (!sessions || sessions.length === 0) {
           setError('Session not found. Please check your PIN.');
           setLoading(false);
-          setConnectionStatus('error');
+          setConnectionStatus('error: session not found');
           return;
         }
 
         setConnectionStatus('checking player');
         
-        // Try to find the existing player
-        let players = await safeRoomOperation(() => 
-          room.collection('player').filter({ 
-            session_pin: pin, 
-            name: playerName 
-          }).getList()
-        );
-
-        console.log(`[${APP_VERSION}] Found players:`, players?.length || 0);
-
-        // If no players found, create one with retries
-        if (!players || players.length === 0) {
-          console.log(`[${APP_VERSION}] Player not found, attempting to create...`);
-          setConnectionStatus('creating player');
-          
-          // Try to create the player with retries
-          let playerCreated = false;
-          let maxCreateRetries = 3;
-          let createRetryCount = 0;
-          
-          while (!playerCreated && createRetryCount < maxCreateRetries) {
-            try {
-              const newPlayer = await safeRoomOperation(() => 
-                room.collection('player').create({
-                  session_pin: pin,
-                  name: playerName,
-                  current_card: null,
-                  expires_at: null,
-                })
-              );
-              console.log(`[${APP_VERSION}] Created new player:`, newPlayer?.id);
-              setPlayerId(newPlayer.id);
-              playerCreated = true;
-            } catch (createErr) {
-              const errorMsg = logError(`Failed to create player (attempt ${createRetryCount + 1})`, createErr);
-              createRetryCount++;
-              setConnectionStatus(`retry ${createRetryCount}/${maxCreateRetries}`);
+        for (let findAttempt = 0; findAttempt < 3; findAttempt++) {
+          try {
+            let players = await safeRoomOperation(
+              () => room.collection('player').filter({ 
+                session_pin: pin, 
+                name: playerName 
+              }).getList(),
+              2,
+              8000
+            );
+            
+            reportStatus('PlayerView', `Player search attempt ${findAttempt+1}`, { 
+              found: players?.length > 0
+            });
+            
+            if (players && players.length > 0) {
+              setPlayerId(players[0].id);
+              setDebugInfo(prev => ({ ...prev, playerFound: true }));
+              reportStatus('PlayerView', 'Found existing player', { id: players[0].id });
+              break;
+            }
+            
+            if (findAttempt === 0) {
+              setConnectionStatus('creating player');
               
-              // Check if player was actually created despite the error
-              await new Promise(resolve => setTimeout(resolve, 1000));
-              
-              players = await safeRoomOperation(() => 
-                room.collection('player').filter({ 
-                  session_pin: pin, 
-                  name: playerName 
-                }).getList()
-              );
-              
-              if (players && players.length > 0) {
-                console.log(`[${APP_VERSION}] Player was created despite error`);
-                setPlayerId(players[0].id);
-                playerCreated = true;
+              try {
+                const newPlayer = await safeRoomOperation(
+                  () => room.collection('player').create({
+                    session_pin: pin,
+                    name: playerName,
+                    current_card: null,
+                    expires_at: null,
+                    joined_at: new Date().toISOString(),
+                    client_info: `${APP_VERSION}|${navigator.userAgent.slice(0, 50)}`
+                  }),
+                  4,
+                  15000
+                );
+                
+                reportStatus('PlayerView', 'Created new player', { id: newPlayer.id });
+                setPlayerId(newPlayer.id);
+                setDebugInfo(prev => ({ ...prev, playerFound: true }));
                 break;
+              } catch (createErr) {
+                logError(`Player creation attempt ${findAttempt+1} failed`, createErr);
               }
             }
             
-            if (!playerCreated) {
-              await new Promise(resolve => setTimeout(resolve, 1000 * createRetryCount));
+            if (findAttempt < 2) {
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+          } catch (findErr) {
+            logError(`Player search attempt ${findAttempt+1} failed`, findErr);
+            if (findAttempt < 2) {
+              await new Promise(resolve => setTimeout(resolve, 2000));
             }
           }
-          
-          if (!playerCreated) {
-            setError('Could not join session. Please try again with a different name.');
-            setLoading(false);
-            setConnectionStatus('error');
-            return;
-          }
-        } else {
-          setPlayerId(players[0].id);
+        }
+        
+        if (!playerId) {
+          setError('Could not join session. Please try again with a different name.');
+          setLoading(false);
+          setConnectionStatus('error: failed to join');
+          return;
         }
 
         setLoading(false);
         setConnectionStatus('connected');
         initialSetupDone.current = true;
+        reportStatus('PlayerView', 'Player setup complete', { id: playerId });
 
-        // Subscribe to player changes - FIXED: Improved reliability
-        const subscribeToPlayerUpdates = () => {
-          try {
-            return room.collection('player')
-              .filter({ session_pin: pin, name: playerName })
-              .subscribe(playersList => {
-                if (playersList && playersList.length > 0) {
-                  const player = playersList[0];
-                  setCurrentCard(player.current_card);
-
-                  if (player.expires_at) {
-                    const expiry = new Date(player.expires_at).getTime();
-                    const now = Date.now();
-                    const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
-                    setTimeLeft(remaining);
-
-                    // Calculate total time from remaining time and session settings
-                    const totalTimeEstimate = remaining + 5; // Add buffer for calculation
-                    setTotalTime(Math.max(totalTime, totalTimeEstimate));
-                  } else if (!player.current_card || player.current_card === 'END') {
-                    // Reset timer if no card or ended
-                    setTimeLeft(0);
-                  }
-                }
+        const setupPlayerSubscription = () => {
+          let retryAttempt = 0;
+          const maxRetries = 10;
+          
+          const attemptSubscribe = () => {
+            try {
+              reportStatus('PlayerView', 'Subscribing to player updates', { 
+                attempt: retryAttempt + 1 
               });
-          } catch (subErr) {
-            logError("Error subscribing to player updates", subErr);
-            // Retry subscription after a delay
-            setTimeout(subscribeToPlayerUpdates, 3000);
-            return () => {}; // Return empty unsubscribe function
-          }
+              
+              return room.collection('player')
+                .filter({ session_pin: pin, name: playerName })
+                .subscribe(playersList => {
+                  if (playersList && playersList.length > 0) {
+                    const player = playersList[0];
+                    setCurrentCard(player.current_card);
+                    setDebugInfo(prev => ({ 
+                      ...prev, 
+                      lastAction: `Player update: ${player.current_card || 'no card'}`
+                    }));
+
+                    if (player.expires_at) {
+                      const expiry = new Date(player.expires_at).getTime();
+                      const now = Date.now();
+                      const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
+                      setTimeLeft(remaining);
+
+                      const totalTimeEstimate = remaining + 5; 
+                      setTotalTime(Math.max(totalTime, totalTimeEstimate));
+                    } else if (!player.current_card || player.current_card === 'END') {
+                      setTimeLeft(0);
+                    }
+                  }
+                });
+            } catch (subErr) {
+              logError(`Error subscribing to player updates (attempt ${retryAttempt + 1})`, subErr);
+              
+              if (retryAttempt < maxRetries) {
+                retryAttempt++;
+                setTimeout(attemptSubscribe, Math.min(2000 * retryAttempt, 10000));
+                return () => {}; 
+              } else {
+                setConnectionStatus('subscription failed');
+                return () => {}; 
+              }
+            }
+          };
+          
+          return attemptSubscribe();
         };
         
-        return subscribeToPlayerUpdates();
+        return setupPlayerSubscription();
       } catch (err) {
         const errorMsg = logError('Failed to setup player', err);
+        
         if (retries < 3) {
-          setRetries(retries + 1);
+          setRetries(prev => prev + 1);
           setConnectionStatus(`retrying (${retries + 1}/3)`);
-          setTimeout(() => setupPlayer(), 2000); // Retry after delay
+          setTimeout(() => setupPlayer(), 2000); 
         } else {
           setError('Failed to connect to session. Please try again.');
           setLoading(false);
-          setConnectionStatus('error');
+          setConnectionStatus('error: max retries reached');
         }
       }
     };
@@ -1310,69 +1599,77 @@ function PlayerView({ pin, playerName, setView }) {
     setupPlayer();
   }, [pin, playerName, retries]);
 
-  // Subscribe to session - FIXED: improved reliability
   useEffect(() => {
     if (pin) {
       const subscribeToSession = () => {
-        try {
-          return room.collection('session')
-            .filter({ pin })
-            .subscribe(sessionsList => {
-              if (sessionsList && sessionsList.length > 0) {
-                const session = sessionsList[0];
-                setIsSessionActive(session.is_playing);
-                
-                // Update total time estimate from session settings
-                if (session.min_time && session.max_time) {
-                  const avgSessionTime = (session.min_time + session.max_time) / 2;
-                  if (!totalTime || avgSessionTime > totalTime) {
-                    setTotalTime(avgSessionTime);
-                  }
-                }
-              } else {
-                setError('Session not found');
-              }
+        let retryAttempt = 0;
+        const maxRetries = 10;
+        
+        const attemptSubscribe = () => {
+          try {
+            reportStatus('PlayerView', 'Subscribing to session', { 
+              attempt: retryAttempt + 1 
             });
-        } catch (err) {
-          logError("Error subscribing to session", err);
-          // Retry subscription after a delay
-          setTimeout(subscribeToSession, 3000);
-          return () => {}; // Return empty unsubscribe function
-        }
+            
+            return room.collection('session')
+              .filter({ pin })
+              .subscribe(sessionsList => {
+                if (sessionsList && sessionsList.length > 0) {
+                  const session = sessionsList[0];
+                  setIsSessionActive(session.is_playing);
+                  
+                  if (session.min_time && session.max_time) {
+                    const avgSessionTime = (session.min_time + session.max_time) / 2;
+                    if (!totalTime || avgSessionTime > totalTime) {
+                      setTotalTime(avgSessionTime);
+                    }
+                  }
+                } else {
+                  setError('Session not found');
+                }
+              });
+          } catch (subErr) {
+            logError(`Error subscribing to session (attempt ${retryAttempt + 1})`, subErr);
+            
+            if (retryAttempt < maxRetries) {
+              retryAttempt++;
+              setTimeout(attemptSubscribe, Math.min(2000 * retryAttempt, 10000));
+              return () => {}; 
+            } else {
+              return () => {}; 
+            }
+          }
+        };
+        
+        return attemptSubscribe();
       };
       
       return subscribeToSession();
     }
   }, [pin]);
 
-  // Timer to update time left - FIXED: more accurate countdown
   useEffect(() => {
     if (currentCard && currentCard !== 'END' && timeLeft > 0) {
       const timer = setInterval(() => {
         setTimeLeft(prev => {
           const newTime = Math.max(0, prev - 1);
           if (newTime === 0 && currentCard) {
-            // When timer hits zero, attempt to fetch updated card from server
-            try {
-              room.collection('player')
-                .filter({ session_pin: pin, name: playerName })
-                .getList()
-                .then(players => {
-                  if (players && players.length > 0) {
-                    setCurrentCard(players[0].current_card);
-                    if (players[0].expires_at) {
-                      const expiry = new Date(players[0].expires_at).getTime();
-                      const now = Date.now();
-                      const newRemaining = Math.max(0, Math.floor((expiry - now) / 1000));
-                      if (newRemaining > 0) {
-                        setTimeLeft(newRemaining);
-                      }
+            room.collection('player')
+              .filter({ session_pin: pin, name: playerName })
+              .getList()
+              .then(players => {
+                if (players && players.length > 0) {
+                  setCurrentCard(players[0].current_card);
+                  if (players[0].expires_at) {
+                    const expiry = new Date(players[0].expires_at).getTime();
+                    const now = Date.now();
+                    const newRemaining = Math.max(0, Math.floor((expiry - now) / 1000));
+                    if (newRemaining > 0) {
+                      setTimeLeft(newRemaining);
                     }
                   }
-                });
-            } catch (err) {
-              logError("Error refreshing player data", err);
-            }
+                }
+              });
           }
           return newTime;
         });
@@ -1382,12 +1679,10 @@ function PlayerView({ pin, playerName, setView }) {
     }
   }, [currentCard, timeLeft, pin, playerName]);
 
-  // ENHANCED: Improved progress calculation for better visual feedback
   const getProgressWidth = () => {
     if (timeLeft <= 0 || totalTime <= 0) return 0;
-    // Calculate percentage with a minimum to ensure visibility
     const percentage = (timeLeft / totalTime) * 100;
-    return Math.max(1, percentage); // At least 1% width to show something is happening
+    return Math.max(1, percentage); 
   };
 
   if (loading) {
@@ -1396,17 +1691,20 @@ function PlayerView({ pin, playerName, setView }) {
         <div>
           <h2 className="header">Connecting to session...</h2>
           <p>Status: {connectionStatus}</p>
-          <div style={{ marginTop: '20px', width: '100%', height: '4px', backgroundColor: '#eee', borderRadius: '2px' }}>
+          <div style={{ marginTop: '20px', width: '100%', height: '8px', backgroundColor: '#eee', borderRadius: '4px' }}>
             <div 
               style={{ 
                 width: '30%', 
                 height: '100%', 
                 backgroundColor: '#000', 
-                borderRadius: '2px',
+                borderRadius: '4px',
                 animation: 'progress-bar 1.5s infinite'
               }}
             ></div>
           </div>
+          <p style={{ marginTop: '10px', fontSize: '12px', color: '#888' }}>
+            Version: {APP_VERSION}
+          </p>
         </div>
       </div>
     );
@@ -1418,9 +1716,21 @@ function PlayerView({ pin, playerName, setView }) {
         <div className="card">
           <h2 className="header">Error</h2>
           <p>{error}</p>
+          <p style={{ fontSize: '14px', marginTop: '8px' }}>Status: {connectionStatus}</p>
           <button className="btn btn-primary" onClick={() => setView('join')}>
             Back to Join
           </button>
+          <div style={{ marginTop: '10px', fontSize: '12px', color: '#888' }}>
+            <details>
+              <summary>Debug Info</summary>
+              <p>Version: {APP_VERSION}</p>
+              <p>Last action: {debugInfo.lastAction}</p>
+              <p>Player found: {debugInfo.playerFound ? 'Yes' : 'No'}</p>
+              <p>PIN: {pin}</p>
+              <p>Name: {playerName}</p>
+              <p>Status: {connectionStatus}</p>
+            </details>
+          </div>
         </div>
       </div>
     );
@@ -1435,6 +1745,9 @@ function PlayerView({ pin, playerName, setView }) {
           <button className="btn" onClick={() => setView('home')} style={{ marginTop: '20px' }}>
             Return to Home
           </button>
+          <p style={{ marginTop: '10px', fontSize: '12px', color: '#888' }}>
+            Version: {APP_VERSION}
+          </p>
         </div>
       </div>
     );
@@ -1447,9 +1760,8 @@ function PlayerView({ pin, playerName, setView }) {
           <div style={{ width: '100%' }}>
             <h1 className="card-text">{currentCard}</h1>
             
-            {/* ENHANCED: Improved countdown visualization */}
             <div style={{ marginTop: '30px', textAlign: 'center' }}>
-              <span style={{ fontSize: '32px', fontWeight: 'bold' }}>{timeLeft}</span>
+              <span style={{ fontSize: '38px', fontWeight: 'bold' }}>{timeLeft}</span>
               <span style={{ fontSize: '20px' }}> seconds remaining</span>
             </div>
             
@@ -1471,11 +1783,16 @@ function PlayerView({ pin, playerName, setView }) {
             <p>PIN: {pin}</p>
             <p>Name: {playerName}</p>
             {!isSessionActive && (
-              <p>Waiting for conductor to start the session</p>
+              <p style={{ marginTop: '15px', fontWeight: 'bold' }}>
+                Waiting for conductor to start the session
+              </p>
             )}
             <div className="connection-status">
               Status: {connectionStatus === 'connected' ? '✓ Connected' : connectionStatus}
             </div>
+            <p style={{ marginTop: '10px', fontSize: '12px', color: '#888' }}>
+              Version: {APP_VERSION}
+            </p>
           </div>
         </div>
       )}
@@ -1483,11 +1800,30 @@ function PlayerView({ pin, playerName, setView }) {
   );
 }
 
-// Render the app
+function getTimeLeft(expiryTime) {
+  if (!expiryTime) return 0;
+  const expiry = new Date(expiryTime).getTime();
+  const now = Date.now();
+  return Math.max(0, Math.floor((expiry - now) / 1000));
+}
+
 try {
   const root = createRoot(document.getElementById('root'));
   root.render(<App />);
+  console.log(`[${APP_VERSION}] App rendered successfully`);
 } catch (err) {
   const errorMsg = logError("Error rendering app", err);
-  document.getElementById('loading').innerHTML = 'Error loading application: ' + errorMsg;
+  const loadingEl = document.getElementById('loading');
+  if (loadingEl) {
+    loadingEl.innerHTML = `
+      <div style="text-align:center;">
+        <h2>Error loading application</h2>
+        <p>${errorMsg}</p>
+        <p>Version: ${APP_VERSION}</p>
+        <button onclick="window.location.reload()" style="padding:10px 20px; margin-top:20px; cursor:pointer;">
+          Reload Page
+        </button>
+      </div>
+    `;
+  }
 }

@@ -3,6 +3,9 @@
   --white: #ffffff;
   --black: #000000;
   --gray: #888888;
+  --light-gray: #f0f0f0;
+  --error-red: #ffeeee;
+  --success-green: #e6ffe6;
 }
 
 * {
@@ -88,6 +91,7 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  margin-bottom: 5px;
 }
 
 .btn:hover {
@@ -112,6 +116,11 @@ html, body {
 .btn-disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.btn-small {
+  padding: 5px 10px;
+  font-size: 14px;
 }
 
 .input {
@@ -214,6 +223,45 @@ html, body {
   text-align: center;
 }
 
+.deck-container {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  margin-bottom: 15px;
+}
+
+.deck-item {
+  padding: 12px;
+  border-bottom: 1px solid #eee;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.deck-item:last-child {
+  border-bottom: none;
+}
+
+.deck-active {
+  background-color: var(--light-gray);
+}
+
+.status-message {
+  padding: 10px;
+  margin: 10px 0;
+  border-radius: 5px;
+  text-align: center;
+}
+
+.status-error {
+  background-color: var(--error-red);
+  color: #d00;
+}
+
+.status-success {
+  background-color: var(--success-green);
+  color: #080;
+}
+
 @keyframes progress-bar {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(400%); }
@@ -237,3 +285,4 @@ html, body {
     flex-direction: column;
   }
 }
+
