@@ -1,5 +1,5 @@
 // App Version for tracking
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
@@ -634,7 +634,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     });
   };
 
-  // FIXED: Further improved file upload for better compatibility and smaller payloads
+  // ENHANCED & FIXED: Ultra-simplified file upload for maximum compatibility
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -642,333 +642,199 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     setLoading(true);
     setError(null);
     setUploadProgress(0);
-    setDeckCreationStatus('');
+    setDeckCreationStatus('Reading file...');
     setDebugInfo(prev => ({ ...prev, lastAction: 'Starting file upload' }));
 
-    // Add a size limit to prevent timeouts
-    const MAX_FILE_SIZE = 250 * 1024; // Reduced to 250KB for better server compatibility
-    if (file.size > MAX_FILE_SIZE) {
-      alert('File is too large (max 250KB). Please split into smaller files.');
-      setLoading(false);
-      setFileInput('');
-      return;
-    }
+    try {
+      // Reduced size limit for better compatibility across all servers
+      const MAX_FILE_SIZE = 100 * 1024; // 100KB for ultra compatibility
+      if (file.size > MAX_FILE_SIZE) {
+        alert('File is too large (max 100KB). Please split into smaller files.');
+        setLoading(false);
+        setFileInput('');
+        return;
+      }
 
-    // Use smaller file reader chunks for better reliability
-    const CHUNK_SIZE = 32 * 1024; // Reduced to 32KB chunks for better server compatibility
-    let offset = 0;
-    const fileSize = file.size;
-    let fileContent = '';
-    
-    const readNextChunk = () => {
+      // Simple file reading - no chunks to minimize complexity
       const reader = new FileReader();
-      const blob = file.slice(offset, Math.min(offset + CHUNK_SIZE, fileSize));
       
-      reader.onload = (e) => {
-        fileContent += e.target.result;
-        offset += CHUNK_SIZE;
-        
-        // Update progress
-        const progress = Math.min(100, Math.round((offset / fileSize) * 100));
-        setUploadProgress(progress);
-        setDeckCreationStatus(`Reading file: ${progress}%`);
-        
-        if (offset < fileSize) {
-          // Read next chunk
-          readNextChunk();
-        } else {
-          // File completely read
-          processFileContent(fileContent);
+      reader.onload = async (e) => {
+        try {
+          setDeckCreationStatus('Parsing JSON...');
+          const content = e.target.result;
+          let data;
+          
+          try {
+            data = JSON.parse(content);
+          } catch (jsonErr) {
+            throw new Error('Failed to parse JSON: ' + jsonErr.message);
+          }
+          
+          // SIMPLIFIED: Process data with minimal computation
+          if (Array.isArray(data)) {
+            // Simple array of strings
+            setDeckCreationStatus('Processing simple array...');
+            await createMicroDeck(file.name.replace('.json', ''), data);
+          } else if (data.cards && Array.isArray(data.cards)) {
+            // Single deck format
+            setDeckCreationStatus('Processing single deck...');
+            await createMicroDeck(data.name || file.name.replace('.json', ''), data.cards);
+          } else if (data.decks && Array.isArray(data.decks)) {
+            // Multiple decks format - process one by one with delays
+            const totalDecks = data.decks.length;
+            setDeckCreationStatus(`Processing ${totalDecks} decks (this may take a while)...`);
+            
+            for (let i = 0; i < totalDecks; i++) {
+              const deck = data.decks[i];
+              setDeckCreationStatus(`Processing deck ${i+1}/${totalDecks}`);
+              
+              if (deck.name && Array.isArray(deck.cards)) {
+                try {
+                  await createMicroDeck(deck.name, deck.cards);
+                  // Add delay between decks
+                  if (i < totalDecks - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 1500));
+                  }
+                } catch (deckErr) {
+                  console.error(`Error with deck ${i+1}:`, deckErr);
+                  // Continue with next deck
+                }
+              }
+            }
+          } else {
+            throw new Error('Invalid JSON format. Expected array of strings or object with cards array.');
+          }
+          
+          // Force refresh decks at the end
+          await refreshDecksList();
+          
+          setDeckCreationStatus('Upload complete!');
+          setTimeout(() => setDeckCreationStatus(''), 3000);
+        } catch (err) {
+          const errorMsg = logError('Failed to process JSON', err);
+          setError('Error processing file: ' + errorMsg);
+          setDeckCreationStatus('Error: ' + errorMsg);
         }
+        
+        setLoading(false);
+        setUploadProgress(0);
       };
       
       reader.onerror = function(err) {
-        const errorMsg = logError('Error reading file chunk', err);
+        const errorMsg = logError('Error reading file', err);
         setError('Error reading file: ' + errorMsg);
         setLoading(false);
         setUploadProgress(0);
       };
       
-      reader.readAsText(blob);
-    };
+      reader.readAsText(file);
+    } catch (err) {
+      const errorMsg = logError('File upload failed', err);
+      setError('Upload failed: ' + errorMsg);
+      setLoading(false);
+      setUploadProgress(0);
+    }
     
-    const processFileContent = async (content) => {
-      try {
-        setDebugInfo(prev => ({ ...prev, lastAction: 'Parsing JSON content' }));
-        setDeckCreationStatus('Parsing JSON...');
-        // Use try-catch for JSON parsing to avoid crashing
-        let data;
-        try {
-          data = JSON.parse(content);
-        } catch (jsonErr) {
-          throw new Error('Failed to parse JSON: ' + jsonErr.message);
-        }
-        
-        // Function to process decks with increased reliability
-        const processDecksWithDelay = async (items) => {
-          const totalItems = items.length;
-          const results = [];
-          
-          // Process 1 deck at a time with longer delays for server compatibility
-          for (let i = 0; i < items.length; i++) {
-            // Update progress
-            const progress = Math.floor((i / totalItems) * 100);
-            setUploadProgress(progress);
-            setDeckCreationStatus(`Processing deck ${i+1}/${totalItems} (${progress}%)`);
-            setDebugInfo(prev => ({ ...prev, lastAction: `Processing deck ${i+1}/${totalItems}` }));
-            
-            try {
-              // Process one deck at a time
-              const deck = items[i];
-              if (deck.name && Array.isArray(deck.cards)) {
-                const result = await createDeck(deck.name, deck.cards);
-                if (result) {
-                  results.push(result);
-                  
-                  // Force a refresh of decks after each successful creation
-                  try {
-                    const refreshedDecks = await room.collection('deck')
-                      .filter({ session_pin: pin })
-                      .getList();
-                    
-                    if (refreshedDecks) {
-                      console.log(`[${APP_VERSION}] Refreshed decks after create:`, refreshedDecks.length);
-                      setDecks(refreshedDecks);
-                      setDebugInfo(prev => ({ ...prev, decksCount: refreshedDecks.length }));
-                    }
-                  } catch (refreshErr) {
-                    logError("Error refreshing decks after create", refreshErr);
-                  }
-                }
-              }
-              
-              // Add a longer delay between each deck for server compatibility
-              if (i < items.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 2000));
-              }
-            } catch (err) {
-              const errorMsg = logError(`Error processing deck at index ${i}`, err);
-              // Continue with next deck despite errors
-              await new Promise(resolve => setTimeout(resolve, 3000)); // Longer delay after error
-            }
-          }
-          
-          setUploadProgress(100);
-          setDeckCreationStatus('All decks processed!');
-          
-          // Final refresh of decks
-          try {
-            const finalDecks = await room.collection('deck')
-              .filter({ session_pin: pin })
-              .getList();
-            
-            if (finalDecks) {
-              console.log(`[${APP_VERSION}] Final deck refresh:`, finalDecks.length);
-              setDecks(finalDecks);
-              setDebugInfo(prev => ({ ...prev, decksCount: finalDecks.length }));
-            }
-          } catch (finalErr) {
-            logError("Error in final deck refresh", finalErr);
-          }
-          
-          return results;
-        };
-
-        if (Array.isArray(data)) {
-          // Simple array of strings
-          setDeckCreationStatus('Processing deck...');
-          setDebugInfo(prev => ({ ...prev, lastAction: 'Processing simple array deck' }));
-          await createDeck(file.name.replace('.json', ''), data);
-        } else if (data.cards && Array.isArray(data.cards)) {
-          // Single deck with cards property
-          setDeckCreationStatus('Processing deck...');
-          setDebugInfo(prev => ({ ...prev, lastAction: 'Processing single deck object' }));
-          await createDeck(data.name || file.name.replace('.json', ''), data.cards);
-        } else if (data.decks && Array.isArray(data.decks)) {
-          // Multiple decks format
-          setDeckCreationStatus(`Processing ${data.decks.length} decks...`);
-          setDebugInfo(prev => ({ ...prev, lastAction: `Processing ${data.decks.length} decks from array` }));
-          await processDecksWithDelay(data.decks);
-        } else {
-          setError('Invalid JSON format. Expected an array of strings or object with cards array.');
-          setDeckCreationStatus('Error: Invalid format');
-          setDebugInfo(prev => ({ ...prev, lastAction: 'Error: Invalid JSON format' }));
-        }
-        
-        // Final deck refresh
-        try {
-          setDebugInfo(prev => ({ ...prev, lastAction: 'Final deck refresh after processing' }));
-          const finalDecks = await room.collection('deck')
-            .filter({ session_pin: pin })
-            .getList();
-            
-          console.log(`[${APP_VERSION}] Final deck count after upload:`, finalDecks?.length || 0);
-          if (finalDecks) {
-            setDecks(finalDecks);
-            setDebugInfo(prev => ({ ...prev, decksCount: finalDecks.length }));
-          }
-        } catch (err) {
-          logError("Error in final deck refresh", err);
-        }
-        
-        setLoading(false);
-        setUploadProgress(0);
-        setTimeout(() => setDeckCreationStatus(''), 5000);
-      } catch (err) {
-        const errorMsg = logError('Failed to process file', err);
-        setError('Error processing file: ' + errorMsg);
-        setLoading(false);
-        setUploadProgress(0);
-        setDeckCreationStatus('Error: ' + errorMsg);
-        setDebugInfo(prev => ({ ...prev, lastAction: 'Error processing file: ' + errorMsg }));
-      }
-    };
-    
-    // Start reading the file in chunks
-    readNextChunk();
     setFileInput('');
   };
 
-  // FIXED: Improved deck creation with smaller batch sizes and individual error handling
-  const createDeck = async (name, cards) => {
-    try {
-      // Validate inputs
-      if (!name || !cards || !Array.isArray(cards) || cards.length === 0) {
-        throw new Error("Invalid deck data");
-      }
-      
-      setDebugInfo(prev => ({ ...prev, lastAction: `Creating deck: ${name} with ${cards.length} cards` }));
-      
-      // Use a more unique deck name to avoid conflicts
-      const timestamp = new Date().getTime();
-      const randomString = Math.random().toString(36).substring(2, 7);
-      const uniqueName = `${name.substring(0, 12)}_${randomString}`;
-
-      // Limit the size of each card to prevent payload issues
-      const processedCards = cards.map(card => {
-        if (typeof card === 'string' && card.length > 80) {
-          return card.substring(0, 80); // Reduced to 80 chars for better server compatibility
-        }
-        return card;
-      }).filter(card => card && typeof card === 'string' && card.trim().length > 0);
-
-      if (processedCards.length === 0) {
-        throw new Error("No valid cards found in deck");
-      }
-
-      console.log(`[${APP_VERSION}] Creating deck "${uniqueName}" with ${processedCards.length} cards`);
-
-      // Split large decks into smaller chunks for server compatibility
-      const MAX_CARDS_PER_DECK = 5; // Reduced to 5 cards for better server compatibility
-      const MAX_CHUNK_SIZE = 2 * 1024; // Reduced to 2KB maximum payload size for server compatibility
-      
-      if (processedCards.length > MAX_CARDS_PER_DECK) {
-        const chunks = [];
-        let currentChunk = [];
-        let currentSize = 0;
-        
-        for (const card of processedCards) {
-          // Roughly estimate the size of the card in the JSON payload
-          const cardSize = JSON.stringify(card).length;
-          
-          // If adding this card would exceed our chunk size or card count, start a new chunk
-          if (currentChunk.length >= MAX_CARDS_PER_DECK || (currentSize + cardSize > MAX_CHUNK_SIZE && currentChunk.length > 0)) {
-            chunks.push([...currentChunk]);
-            currentChunk = [card];
-            currentSize = cardSize;
-          } else {
-            currentChunk.push(card);
-            currentSize += cardSize;
-          }
-        }
-        
-        // Add the last chunk if it has any cards
-        if (currentChunk.length > 0) {
-          chunks.push(currentChunk);
-        }
-        
-        // Create multiple decks
-        for (let i = 0; i < chunks.length; i++) {
-          const chunkName = chunks.length > 1 ? `${name} (${i+1}/${chunks.length})` : name;
-          setDeckCreationStatus(`Creating chunk ${i+1}/${chunks.length}`);
-          setDebugInfo(prev => ({ ...prev, lastAction: `Creating chunk ${i+1}/${chunks.length}` }));
-          
-          try {
-            const result = await createDeckChunk(chunkName, chunks[i]);
-            
-            // Force a refresh after each chunk
-            const refreshedDecks = await room.collection('deck')
-              .filter({ session_pin: pin })
-              .getList();
-              
-            if (refreshedDecks) {
-              console.log(`[${APP_VERSION}] Refreshed decks after chunk:`, refreshedDecks.length);
-              setDecks(refreshedDecks);
-              setDebugInfo(prev => ({ ...prev, decksCount: refreshedDecks.length }));
-            }
-            
-            // Add a larger delay between chunks for server compatibility
-            if (i < chunks.length - 1) {
-              await new Promise(resolve => setTimeout(resolve, 2000)); // Increased delay for better server reliability
-            }
-          } catch (chunkErr) {
-            logError(`Error creating chunk ${i+1}/${chunks.length}`, chunkErr);
-            // Continue with next chunk despite errors
-            await new Promise(resolve => setTimeout(resolve, 3000)); // Longer delay after error
-          }
-        }
-        
-        return { name, chunked: true };
-      } else {
-        return await createDeckChunk(name, processedCards);
-      }
-    } catch (err) {
-      const errorMsg = logError('Failed to create deck', err);
-      setError('Failed to create deck: ' + errorMsg);
-      setDebugInfo(prev => ({ ...prev, lastAction: 'Error: ' + errorMsg }));
-      throw err;
+  // ADDED: Ultra-tiny deck creation function (micro-batched for reliability)
+  const createMicroDeck = async (name, cards) => {
+    if (!name || !cards || !Array.isArray(cards) || cards.length === 0) {
+      throw new Error("Invalid deck data");
     }
-  };
-
-  // Helper function to create a single deck - FIXED: further reduced payload size
-  const createDeckChunk = async (name, cards) => {
+    
+    // Clean and limit cards to prevent payload issues
+    const validCards = cards
+      .filter(card => card && typeof card === 'string' && card.trim().length > 0)
+      .map(card => card.substring(0, 80).trim()); // Limit to 80 chars
+    
+    if (validCards.length === 0) {
+      throw new Error("No valid cards found in deck");
+    }
+    
+    // Make name unique to avoid conflicts
+    const randomId = Math.random().toString(36).substring(2, 7);
+    const safeName = `${name.substring(0, 12)}_${randomId}`;
+    
+    // Ultra-micro batching: Create deck with very few cards per batch
+    const MICRO_BATCH_SIZE = 3; // Just 3 cards per batch for ultra reliability
+    const batches = [];
+    
+    // Split into tiny batches
+    for (let i = 0; i < validCards.length; i += MICRO_BATCH_SIZE) {
+      batches.push(validCards.slice(i, i + MICRO_BATCH_SIZE));
+    }
+    
+    const batchCount = batches.length;
+    
+    // Create first batch with initial deck
     try {
-      setDebugInfo(prev => ({ ...prev, lastAction: `Creating deck chunk "${name}" with ${cards.length} cards` }));
+      const initialCards = batches[0];
+      const deckName = batchCount > 1 ? `${safeName} (1/${batchCount})` : safeName;
       
-      // Create a new deck with enhanced retry logic
       const newDeck = await safeRoomOperation(() =>
         room.collection('deck').create({
           session_pin: pin,
-          name: name,
-          cards: cards,
+          name: deckName,
+          cards: initialCards,
           created_at: new Date().toISOString()
         })
       );
-
-      console.log(`[${APP_VERSION}] Created new deck:`, newDeck?.id);
-      setDebugInfo(prev => ({ ...prev, lastAction: `Successfully created deck: ${newDeck?.id}` }));
-
-      // Update currentDeck to the newly created deck if no deck is selected
+      
+      console.log(`[${APP_VERSION}] Created initial deck batch: ${newDeck?.id}`);
+      
+      // If no currentDeck is selected, select this one
       if (!currentDeck) {
         setCurrentDeck(newDeck.id);
       }
-
-      return newDeck;
+      
+      // If only one batch, we're done
+      if (batchCount === 1) {
+        return newDeck;
+      }
+      
+      // Process remaining batches
+      for (let i = 1; i < batchCount; i++) {
+        const batchName = `${safeName} (${i+1}/${batchCount})`;
+        setDeckCreationStatus(`Creating batch ${i+1}/${batchCount}`);
+        
+        try {
+          const batchDeck = await safeRoomOperation(() =>
+            room.collection('deck').create({
+              session_pin: pin,
+              name: batchName,
+              cards: batches[i],
+              created_at: new Date().toISOString()
+            })
+          );
+          
+          console.log(`[${APP_VERSION}] Created deck batch ${i+1}: ${batchDeck?.id}`);
+          
+          // Add delay between batches
+          if (i < batchCount - 1) {
+            await new Promise(resolve => setTimeout(resolve, 1000)); 
+          }
+        } catch (batchErr) {
+          console.error(`Error with batch ${i+1}:`, batchErr);
+          // Continue with next batch despite errors
+        }
+      }
+      
+      return newDeck; // Return the first deck
     } catch (err) {
-      const errorMsg = logError(`Failed to create deck chunk "${name}"`, err);
-      setDebugInfo(prev => ({ ...prev, lastAction: `Error creating deck: ${errorMsg}` }));
-      throw new Error(`Failed to create deck: ${errorMsg}`);
+      throw new Error(`Failed to create deck: ${err.message}`);
     }
   };
 
-  // FIXED: Improved text submission for deck creation with better reliability
+  // ENHANCED: Improved text submission for reliability
   const handleTextSubmit = async () => {
     if (!textInput.trim() || !deckName.trim()) {
       alert('Please enter both deck name and cards');
       return;
     }
 
-    // Pre-process cards to filter empty lines and trim whitespace
+    // Pre-process cards
     const cards = textInput.split('\n')
       .map(line => line.trim())
       .filter(line => line.length > 0);
@@ -978,111 +844,84 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       return;
     }
 
-    // Limit the number of cards for better server compatibility
-    if (cards.length > 30) {
-      alert('Too many cards in one deck (max 30). Please split into multiple smaller decks.');
+    // Reduced limit for better server compatibility
+    if (cards.length > 15) {
+      alert('Too many cards (max 15). Please split into multiple smaller decks.');
       return;
     }
 
     setLoading(true);
     setError(null);
     setDeckCreationStatus('Processing text input...');
-    setDebugInfo(prev => ({ ...prev, lastAction: 'Starting text deck creation' }));
     
     try {
-      const result = await createDeck(deckName, cards);
+      // Use the micro-deck creation for maximum reliability
+      await createMicroDeck(deckName, cards);
       
-      // Force a final refresh after creating the deck
-      try {
-        setDebugInfo(prev => ({ ...prev, lastAction: 'Refreshing decks after text creation' }));
-        const finalDecks = await room.collection('deck')
-          .filter({ session_pin: pin })
-          .getList();
-          
-        console.log(`[${APP_VERSION}] Final deck count after text input:`, finalDecks?.length || 0);
-        if (finalDecks) {
-          setDecks(finalDecks);
-          setDebugInfo(prev => ({ ...prev, decksCount: finalDecks.length }));
-        }
-      } catch (err) {
-        logError("Error in final deck refresh after text input", err);
-      }
+      // Force a refresh of decks
+      await refreshDecksList();
       
       setTextInput('');
       setDeckName('');
       setDeckCreationStatus('Deck created successfully!');
-      setDebugInfo(prev => ({ ...prev, lastAction: 'Text deck created successfully' }));
-      setTimeout(() => setDeckCreationStatus(''), 5000);
+      setTimeout(() => setDeckCreationStatus(''), 3000);
     } catch (err) {
       const errorMsg = logError('Failed to add deck', err);
       setError('Failed to add deck: ' + errorMsg);
-      setDeckCreationStatus('Error creating deck');
-      setDebugInfo(prev => ({ ...prev, lastAction: 'Error creating text deck: ' + errorMsg }));
+      setDeckCreationStatus('Error: ' + errorMsg);
     }
+    
     setLoading(false);
   };
 
-  // ADDED: Manual deck refresh function
+  // ENHANCED: More aggressive deck refresh with explicit feedback
   const refreshDecksList = async () => {
     setDebugInfo(prev => ({ ...prev, lastAction: 'Manual refresh requested' }));
     setDeckCreationStatus('Refreshing decks...');
     
     try {
-      const refreshedDecks = await room.collection('deck')
-        .filter({ session_pin: pin })
-        .getList();
-        
-      console.log(`[${APP_VERSION}] Manual deck refresh:`, refreshedDecks?.length || 0);
-      if (refreshedDecks) {
+      // Try multiple times with increasing delays
+      let success = false;
+      let attempts = 0;
+      let refreshedDecks = [];
+      
+      while (!success && attempts < 3) {
+        try {
+          refreshedDecks = await room.collection('deck')
+            .filter({ session_pin: pin })
+            .getList();
+            
+          if (refreshedDecks) {
+            success = true;
+          }
+        } catch (err) {
+          attempts++;
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+        }
+      }
+      
+      if (success && refreshedDecks) {
+        console.log(`[${APP_VERSION}] Deck refresh success:`, refreshedDecks.length);
         setDecks(refreshedDecks);
         setDebugInfo(prev => ({ ...prev, decksCount: refreshedDecks.length }));
+        
+        if (refreshedDecks.length > 0 && !currentDeck) {
+          setCurrentDeck(refreshedDecks[0].id);
+        }
+        
         setDeckCreationStatus(`Found ${refreshedDecks.length} decks`);
         setTimeout(() => setDeckCreationStatus(''), 3000);
       } else {
-        setDeckCreationStatus('No decks found');
+        setDeckCreationStatus('Refresh failed. Try again.');
         setTimeout(() => setDeckCreationStatus(''), 3000);
       }
       
       setLastDeckRefresh(Date.now());
     } catch (err) {
-      const errorMsg = logError("Error manually refreshing decks", err);
-      setDeckCreationStatus('Error refreshing: ' + errorMsg);
+      const errorMsg = logError("Error refreshing decks", err);
+      setDeckCreationStatus('Refresh error: ' + errorMsg);
       setTimeout(() => setDeckCreationStatus(''), 5000);
     }
-  };
-
-  const downloadDecks = () => {
-    try {
-      const decksToDownload = {
-        version: APP_VERSION,
-        exportDate: new Date().toISOString(),
-        decks: decks.map(deck => ({
-          name: deck.name,
-          cards: deck.cards
-        }))
-      };
-
-      const json = JSON.stringify(decksToDownload, null, 2);
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `improv_decks_v${APP_VERSION}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      logError('Error downloading decks', err);
-      alert('Error creating download. Please try again.');
-    }
-  };
-
-  const getTimeLeft = (expiresAt) => {
-    if (!expiresAt) return 0;
-    const remaining = new Date(expiresAt).getTime() - Date.now();
-    return Math.max(0, Math.floor(remaining / 1000));
   };
 
   return (
@@ -1118,20 +957,19 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             disabled={loading}
           />
           <p className="helper-text">Accepts single deck (array of strings), deck object {`{ name, cards }`}, or multiple decks {`{ decks: [{ name, cards }] }`}</p>
-          {loading && uploadProgress > 0 && (
+          {loading && (
             <div style={{ marginTop: '10px' }}>
               <div style={{ width: '100%', backgroundColor: '#eee', borderRadius: '4px', overflow: 'hidden' }}>
                 <div 
                   style={{
-                    width: `${uploadProgress}%`, 
+                    width: '100%', 
                     backgroundColor: 'black', 
                     height: '10px', 
-                    transition: 'width 0.3s ease'
+                    animation: 'progress-bar 1.5s infinite'
                   }}
                 ></div>
               </div>
-              <p>Progress: {uploadProgress}%</p>
-              {deckCreationStatus && <p>{deckCreationStatus}</p>}
+              <p>Status: {deckCreationStatus || 'Processing...'}</p>
             </div>
           )}
         </div>
@@ -1173,9 +1011,9 @@ function ConductorView({ setView, sessionData, setSessionData }) {
               className="btn" 
               onClick={refreshDecksList}
               disabled={loading}
-              style={{ marginRight: '10px' }}
+              style={{ marginRight: '10px', backgroundColor: '#000', color: '#fff' }}
             >
-              Refresh Decks List
+              Force Refresh Decks List
             </button>
             <span style={{ fontSize: '12px', color: '#888' }}>
               Last refreshed: {lastDeckRefresh ? new Date(lastDeckRefresh).toLocaleTimeString() : 'never'}
@@ -1183,7 +1021,12 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           </div>
           
           {decks.length === 0 ? (
-            <p>No decks uploaded yet</p>
+            <div>
+              <p>No decks uploaded yet</p>
+              <p className="helper-text" style={{color: 'red'}}>
+                If you've uploaded decks but don't see them, try clicking "Force Refresh Decks List"
+              </p>
+            </div>
           ) : (
             <>
               <select 
