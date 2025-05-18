@@ -1,5 +1,5 @@
 // App Version for tracking
-const APP_VERSION = "1.12.0";
+const APP_VERSION = "1.13.0";
 
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
@@ -778,8 +778,21 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   // End session function
   const endSession = async () => {
     setCardDistributionStatus('Ending session...');
+    setIsEnding(true);
     
     try {
+      // First update session state to stop new distributions
+      if (sessionData && sessionData.id) {
+        await safeRoomOperation(() =>
+          room.collection('session').update(sessionData.id, {
+            is_playing: false,
+            is_ending: true,
+            last_updated: new Date().toISOString()
+          })
+        );
+      }
+      
+      // Then update all players with END card
       const updatePromises = players.map(player => 
         safeRoomOperation(
           () => room.collection('player').update(player.id, {
@@ -794,11 +807,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       
       await Promise.allSettled(updatePromises);
       
-      setCardDistributionStatus('Session ended successfully');
-      setIsPlaying(false);
-      setIsEnding(false);
-      
-      // Update session status
+      // Then finalize session end state
       if (sessionData && sessionData.id) {
         await safeRoomOperation(() =>
           room.collection('session').update(sessionData.id, {
@@ -808,9 +817,29 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           })
         );
       }
+      
+      setCardDistributionStatus('Session ended successfully');
+      setIsPlaying(false);
+      setIsEnding(false);
     } catch (err) {
       logError('End session error', err);
       setCardDistributionStatus(`Error ending session: ${err.message}`);
+      
+      // Safety fallback - reset state even if error
+      setIsPlaying(false);
+      setIsEnding(false);
+      
+      // Try one more time with simpler approach
+      try {
+        if (sessionData && sessionData.id) {
+          await room.collection('session').update(sessionData.id, {
+            is_playing: false,
+            is_ending: false
+          });
+        }
+      } catch (finalErr) {
+        // Ignore final attempt errors
+      }
     }
   };
 
@@ -1327,18 +1356,16 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         </div>
         
         {loading && (
-          <div style={{ marginTop: '10px', marginBottom: '15px' }}>
-            <div style={{ width: '100%', backgroundColor: '#eee', borderRadius: '4px', overflow: 'hidden' }}>
-              <div 
-                style={{ 
-                  width: '50%', 
-                  height: '10px', 
-                  backgroundColor: 'black', 
-                  borderRadius: '4px',
-                  animation: 'progress-bar 1.5s infinite'
-                }}
-              ></div>
-            </div>
+          <div style={{ marginTop: '10px', width: '100%', height: '8px', backgroundColor: '#eee', borderRadius: '4px' }}>
+            <div 
+              style={{ 
+                width: '50%', 
+                height: '100%', 
+                backgroundColor: '#000', 
+                borderRadius: '4px',
+                animation: 'progress-bar 1.5s infinite'
+              }}
+            ></div>
           </div>
         )}
         
@@ -1620,14 +1647,15 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             className="input" 
             value={mode} 
             onChange={(e) => setMode(e.target.value)}
-            disabled={isPlaying}
           >
             <option value="unison">Unison - Give everyone the same card</option>
             <option value="unique">Unique - Give everyone different cards</option>
             <option value="random">Random - Mix of same and different cards</option>
           </select>
           <p className="helper-text">
-            Choose how to distribute cards from the selected deck
+            {isPlaying ? 
+              "Changes will apply to the next card distribution" : 
+              "Choose how to distribute cards from the selected deck"}
           </p>
         </div>
 
@@ -1645,7 +1673,6 @@ function ConductorView({ setView, sessionData, setSessionData }) {
                 onChange={(e) => setMinTime(Math.max(5, parseInt(e.target.value) || 5))}
                 min="5"
                 max="300"
-                disabled={isPlaying}
               />
             </div>
             <div style={{ width: '50%' }}>
@@ -1657,7 +1684,6 @@ function ConductorView({ setView, sessionData, setSessionData }) {
                 onChange={(e) => setMaxTime(Math.max(minTime, parseInt(e.target.value) || minTime))}
                 min={minTime}
                 max="300"
-                disabled={isPlaying}
               />
             </div>
           </div>
@@ -1666,18 +1692,11 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           </p>
         </div>
 
-        <div className="mb-4">
-          <div style={{ marginBottom: '10px' }}>
-            <strong>Selected Deck:</strong> {selectedDeck ? selectedDeck.name : 'None selected'}
-            {selectedDeck && <span style={{ marginLeft: '5px', color: '#666', fontSize: '14px' }}>({selectedDeck.cards?.length || 0} cards)</span>}
-          </div>
-        </div>
-
         <div className="conductor-actions">
           {isPlaying ? (
             <button 
               className="btn btn-primary" 
-              onClick={() => setIsEnding(true)}
+              onClick={endSession}
               style={{ 
                 backgroundColor: '#ff3b30', 
                 borderColor: '#ff3b30',
@@ -1902,6 +1921,8 @@ function PlayerView({ pin, playerName, setView }) {
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const initialSetupDone = useRef(false);
   const pollIntervalRef = useRef(null);
+  const timerRef = useRef(null);
+  const lastTimeRef = useRef(0);
 
   useEffect(() => {
     if (initialSetupDone.current) return;
@@ -1945,6 +1966,33 @@ function PlayerView({ pin, playerName, setView }) {
             if (players && players.length > 0) {
               setPlayerId(players[0].id);
               setDebugInfo(prev => ({ ...prev, playerFound: true }));
+              
+              // Immediately set current card if player has one
+              if (players[0].current_card) {
+                setCurrentCard(players[0].current_card);
+                setLastCardUpdate(Date.now());
+                
+                if (players[0].expires_at) {
+                  const expiry = new Date(players[0].expires_at).getTime();
+                  const now = Date.now();
+                  const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
+                  setTimeLeft(remaining);
+                  
+                  // Estimate total time from session or use a reasonable default
+                  try {
+                    const sessionData = await room.collection('session').filter({ pin }).getList();
+                    if (sessionData && sessionData.length > 0) {
+                      const avgTime = (sessionData[0].min_time + sessionData[0].max_time) / 2;
+                      setTotalTime(avgTime);
+                    } else {
+                      setTotalTime(Math.max(remaining, 30)); // Fallback
+                    }
+                  } catch (err) {
+                    setTotalTime(Math.max(remaining, 30)); // Fallback
+                  }
+                }
+              }
+              
               reportStatus('PlayerView', 'Found existing player', { id: players[0].id });
               break;
             }
@@ -1998,7 +2046,7 @@ function PlayerView({ pin, playerName, setView }) {
         initialSetupDone.current = true;
         reportStatus('PlayerView', 'Player setup complete', { id: playerId });
 
-        // Set up polling as a fallback for real-time updates
+        // More aggressive polling for better reliability
         pollIntervalRef.current = setInterval(async () => {
           try {
             const polledPlayers = await room.collection('player')
@@ -2008,32 +2056,39 @@ function PlayerView({ pin, playerName, setView }) {
             if (polledPlayers && polledPlayers.length > 0) {
               const player = polledPlayers[0];
               
-              // Only update if the card has changed or if it's been a while since the last update
-              if (player.current_card !== currentCard || 
-                  !lastCardUpdate || 
-                  (Date.now() - lastCardUpdate > 10000)) {
+              // Always update the card if one exists
+              if (player.current_card) {
+                // Only update if card has changed or there's been enough time
+                const cardChanged = player.current_card !== currentCard;
+                const timeToUpdate = !lastCardUpdate || (Date.now() - lastCardUpdate > 5000);
                 
-                setCurrentCard(player.current_card);
-                setLastCardUpdate(Date.now());
-                setDebugInfo(prev => ({ 
-                  ...prev, 
-                  lastAction: `Card poll update: ${player.current_card || 'no card'}`
-                }));
-                
-                if (player.expires_at) {
-                  const expiry = new Date(player.expires_at).getTime();
-                  const now = Date.now();
-                  const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
-                  setTimeLeft(remaining);
+                if (cardChanged || timeToUpdate) {
+                  setCurrentCard(player.current_card);
+                  setLastCardUpdate(Date.now());
+                  setDebugInfo(prev => ({ 
+                    ...prev, 
+                    lastAction: `Card poll update: ${player.current_card || 'no card'}`
+                  }));
                   
-                  // Estimate total time based on max and min time from the session
-                  const sessions = await room.collection('session').filter({ pin }).getList();
-                  if (sessions && sessions.length > 0) {
-                    const session = sessions[0];
-                    const avgTime = (session.min_time + session.max_time) / 2;
-                    setTotalTime(avgTime);
-                  } else {
-                    setTotalTime(Math.max(remaining + 5, 30)); // Fallback
+                  if (player.expires_at) {
+                    const expiry = new Date(player.expires_at).getTime();
+                    const now = Date.now();
+                    const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
+                    setTimeLeft(remaining);
+                    
+                    // Get total time from session for better progress visualization
+                    try {
+                      const sessions = await room.collection('session').filter({ pin }).getList();
+                      if (sessions && sessions.length > 0) {
+                        const session = sessions[0];
+                        const avgTime = (session.min_time + session.max_time) / 2;
+                        setTotalTime(avgTime);
+                      } else {
+                        setTotalTime(Math.max(remaining + 5, 30)); // Fallback
+                      }
+                    } catch (err) {
+                      setTotalTime(Math.max(remaining + 5, 30)); // Fallback on error
+                    }
                   }
                 }
               }
@@ -2041,7 +2096,7 @@ function PlayerView({ pin, playerName, setView }) {
           } catch (pollErr) {
             // Silent fail for polling - it's just a backup
           }
-        }, 5000);
+        }, 3000); // More frequent polling
 
         // Set up subscription for real-time updates
         const setupPlayerSubscription = () => {
@@ -2071,6 +2126,20 @@ function PlayerView({ pin, playerName, setView }) {
                       const now = Date.now();
                       const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
                       setTimeLeft(remaining);
+                      
+                      // Calculate total time from expires_at and session settings (if available)
+                      if (totalTime <= 0) {
+                        room.collection('session').filter({ pin }).getList().then(sessions => {
+                          if (sessions && sessions.length > 0) {
+                            const avgTime = (sessions[0].min_time + sessions[0].max_time) / 2;
+                            setTotalTime(avgTime);
+                          } else {
+                            setTotalTime(Math.max(remaining + 5, 30)); // Fallback
+                          }
+                        }).catch(() => {
+                          setTotalTime(Math.max(remaining + 5, 30)); // Fallback on error
+                        });
+                      }
                     } else if (!player.current_card || player.current_card === 'END') {
                       setTimeLeft(0);
                     }
@@ -2114,6 +2183,10 @@ function PlayerView({ pin, playerName, setView }) {
     return () => {
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
+      }
+      
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
       }
     };
   }, [pin, playerName, retries]);
@@ -2166,13 +2239,29 @@ function PlayerView({ pin, playerName, setView }) {
     }
   }, [pin]);
 
-  // Timer logic for countdown
+  // Improved timer logic for smoother countdown
   useEffect(() => {
     if (currentCard && currentCard !== 'END' && timeLeft > 0) {
-      const timer = setInterval(() => {
+      // Clear any existing timer
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+      
+      // Store the last time for smooth countdown
+      lastTimeRef.current = Date.now();
+      
+      // Set up a faster interval for smoother visual updates
+      timerRef.current = setInterval(() => {
+        const now = Date.now();
+        const elapsed = (now - lastTimeRef.current) / 1000;
+        lastTimeRef.current = now;
+        
         setTimeLeft(prev => {
-          const newTime = Math.max(0, prev - 1);
-          if (newTime === 0 && currentCard) {
+          // Calculate new time with more precision
+          const newTime = Math.max(0, prev - elapsed);
+          
+          // When timer expires, check if we have a new card
+          if (newTime <= 0 && currentCard) {
             // When timer expires, check if we have a new card
             setTimeout(async () => {
               try {
@@ -2199,11 +2288,18 @@ function PlayerView({ pin, playerName, setView }) {
               }
             }, 500);
           }
-          return newTime;
+          
+          return parseFloat(newTime.toFixed(1)); // Keep one decimal place for smoother appearance
         });
-      }, 1000);
+      }, 100); // Update 10 times per second for smooth visuals
 
-      return () => clearInterval(timer);
+      return () => {
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+        }
+      };
+    } else if (timerRef.current) {
+      clearInterval(timerRef.current);
     }
   }, [currentCard, timeLeft, pin, playerName]);
 
@@ -2256,8 +2352,9 @@ function PlayerView({ pin, playerName, setView }) {
 
   const getProgressWidth = () => {
     if (timeLeft <= 0 || totalTime <= 0) return 0;
+    // Smooth calculation with better precision
     const percentage = (timeLeft / totalTime) * 100;
-    return Math.max(1, percentage); 
+    return Math.max(0.5, percentage); // Ensure at least a tiny bit is visible
   };
 
   if (loading) {
@@ -2333,19 +2430,25 @@ function PlayerView({ pin, playerName, setView }) {
       {currentCard ? (
         <div className="fullscreen-card">
           <div style={{ width: '100%' }}>
-            <h1 className="card-text">{currentCard}</h1>
+            <h1 className="card-text" style={{ fontSize: '36px', padding: '10px' }}>{currentCard}</h1>
             
             <div style={{ marginTop: '30px', textAlign: 'center' }}>
-              <span style={{ fontSize: '38px', fontWeight: 'bold' }}>{timeLeft}</span>
+              <span style={{ 
+                fontSize: '48px', 
+                fontWeight: 'bold',
+                color: timeLeft < 10 ? '#ff3b30' : '#000'
+              }}>
+                {Math.ceil(timeLeft)}
+              </span>
               <span style={{ fontSize: '20px' }}> seconds remaining</span>
             </div>
             
-            <div className="timer-bar">
-              <div
+            <div className="timer-bar" style={{ height: '14px', marginTop: '30px' }}>
+              <div 
                 className="timer-progress"
                 style={{ 
                   width: `${getProgressWidth()}%`,
-                  transition: 'width 0.95s linear',
+                  transition: 'width 0.1s linear', // Smoother transition
                   backgroundColor: timeLeft < 10 ? '#ff3b30' : '#000'
                 }}
               ></div>

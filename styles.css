@@ -76,6 +76,9 @@ html, body {
   font-weight: bold;
   color: var(--black);
   word-wrap: break-word;
+  text-shadow: 0 0 1px rgba(0,0,0,0.1);
+  padding: 10px;
+  line-height: 1.4;
 }
 
 .btn {
@@ -169,12 +172,14 @@ html, body {
   border-radius: 5px;
   overflow: hidden;
   margin-top: 20px;
+  border: 1px solid rgba(0,0,0,0.1);
 }
 
 .timer-progress {
   height: 100%;
   background-color: var(--black);
-  transition: width 1s linear;
+  will-change: width;
+  transition: width 0.1s linear;
 }
 
 .player-list {
@@ -310,7 +315,8 @@ html, body {
 .player-timer-progress {
   height: 100%;
   background-color: #000;
-  transition: width 1s linear;
+  will-change: width;
+  transition: width 0.1s linear;
 }
 
 .conductor-card-info {
