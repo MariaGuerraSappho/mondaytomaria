@@ -882,115 +882,130 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     setTimeout(() => refreshDecksList(true), 1000);
   };
 
-  // Card distribution function
-  const distributeCards = async () => {
-    if (!currentDeck || players.length === 0 || !isPlaying || isEnding) {
-      setCardDistributionStatus('Cannot distribute cards: missing deck, players, or not in play mode');
+ const distributeCards = async () => {
+  if (!currentDeck || players.length === 0 || !isPlaying || isEnding) {
+    setCardDistributionStatus('Cannot distribute cards: missing deck, players, or not in play mode');
+    return;
+  }
+
+  setCardDistributionStatus('Preparing to distribute cards...');
+
+  try {
+    // 🔧 Fetch fresh copy of the selected deck directly from the database
+    let selectedDeck;
+    try {
+      selectedDeck = await safeRoomOperation(
+        () => room.collection('deck').get(currentDeck),
+        3,
+        10000
+      );
+      console.log("[DEBUG] Live deck fetched:", selectedDeck);
+    } catch (err) {
+      logError("Failed to fetch selected deck", err);
+      setCardDistributionStatus("Error: Could not retrieve selected deck from server.");
       return;
     }
 
-    setCardDistributionStatus('Preparing to distribute cards...');
-
-    try {
-      const selectedDeck = decks.find(deck => deck.id === currentDeck);
-      if (!selectedDeck || !selectedDeck.cards || selectedDeck.cards.length === 0) {
-        setCardDistributionStatus('Error: Selected deck has no cards');
-        return;
-      }
-
-      const cardsPool = [...selectedDeck.cards];
-      
-      setLastCardDistribution({
-        timestamp: Date.now(),
-        deckId: currentDeck
-      });
-
-      setCardDistributionStatus(`Distributing cards from "${selectedDeck.name}" to ${players.length} players in ${mode} mode...`);
-
-      let unisonCard = null;
-      
-      if (mode === 'unison') {
-        const randomIndex = Math.floor(Math.random() * cardsPool.length);
-        unisonCard = cardsPool[randomIndex];
-        console.log(`[${APP_VERSION}] Unison mode: Selected card "${unisonCard}" for all players`);
-      }
-
-      const usedCardIndices = new Set();
-
-      const updatePromises = players.map(async (player) => {
-        let selectedCard;
-        
-        switch (mode) {
-          case 'unison':
-            selectedCard = unisonCard;
-            break;
-            
-          case 'unique':
-            if (cardsPool.length > 0) {
-              if (usedCardIndices.size < cardsPool.length) {
-                let randomIndex;
-                do {
-                  randomIndex = Math.floor(Math.random() * cardsPool.length);
-                } while (usedCardIndices.has(randomIndex));
-                
-                usedCardIndices.add(randomIndex);
-                selectedCard = cardsPool[randomIndex];
-              } else {
-                selectedCard = cardsPool[Math.floor(Math.random() * cardsPool.length)];
-              }
-            } else {
-              selectedCard = "Error: No cards available";
-            }
-            break;
-            
-          case 'random':
-          default:
-            selectedCard = cardsPool[Math.floor(Math.random() * cardsPool.length)];
-            break;
-        }
-
-        const randomTime = Math.floor(Math.random() * (maxTime - minTime + 1)) + minTime;
-        const expiryTime = new Date(Date.now() + randomTime * 1000).toISOString();
-
-        try {
-          return safeRoomOperation(
-            () => room.collection('player').update(player.id, {
-              current_card: selectedCard,
-              deck_name: selectedDeck.name, 
-              expires_at: expiryTime,
-              updated_at: new Date().toISOString(),
-              total_duration_ms: randomTime * 1000 
-            }),
-            3,
-            10000
-          );
-        } catch (error) {
-          logError(`Failed to update player ${player.name}`, error);
-          return null;
-        }
-      });
-
-      const results = await Promise.allSettled(updatePromises);
-      const successCount = results.filter(r => r.status === 'fulfilled').length;
-      
-      setCardDistributionStatus(`Cards distributed to ${successCount}/${players.length} players`);
-      
-      if (isPlaying && !isEnding) {
-        const nextDistributionTime = Math.max(minTime * 1000, 15000); 
-        setTimeout(() => {
-          if (isPlaying && !isEnding) {
-            distributeCards();
-          }
-        }, nextDistributionTime);
-      }
-
-      return successCount;
-    } catch (err) {
-      logError('Card distribution error', err);
-      setCardDistributionStatus(`Error distributing cards: ${err.message}`);
-      return 0;
+    if (!selectedDeck || !Array.isArray(selectedDeck.cards) || selectedDeck.cards.length === 0) {
+      setCardDistributionStatus('Error: Selected deck has no cards');
+      return;
     }
-  };
+
+    const cardsPool = [...selectedDeck.cards];
+
+    setLastCardDistribution({
+      timestamp: Date.now(),
+      deckId: currentDeck
+    });
+
+    setCardDistributionStatus(`Distributing cards from "${selectedDeck.name}" to ${players.length} players in ${mode} mode...`);
+
+    let unisonCard = null;
+
+    if (mode === 'unison') {
+      const randomIndex = Math.floor(Math.random() * cardsPool.length);
+      unisonCard = cardsPool[randomIndex];
+      console.log(`[${APP_VERSION}] Unison mode: Selected card "${unisonCard}" for all players`);
+    }
+
+    const usedCardIndices = new Set();
+
+    const updatePromises = players.map(async (player) => {
+      let selectedCard;
+
+      switch (mode) {
+        case 'unison':
+          selectedCard = unisonCard;
+          break;
+
+        case 'unique':
+          if (cardsPool.length > 0) {
+            if (usedCardIndices.size < cardsPool.length) {
+              let randomIndex;
+              do {
+                randomIndex = Math.floor(Math.random() * cardsPool.length);
+              } while (usedCardIndices.has(randomIndex));
+
+              usedCardIndices.add(randomIndex);
+              selectedCard = cardsPool[randomIndex];
+            } else {
+              selectedCard = cardsPool[Math.floor(Math.random() * cardsPool.length)];
+            }
+          } else {
+            selectedCard = "Error: No cards available";
+          }
+          break;
+
+        case 'random':
+        default:
+          selectedCard = cardsPool[Math.floor(Math.random() * cardsPool.length)];
+          break;
+      }
+
+      const randomTime = Math.floor(Math.random() * (maxTime - minTime + 1)) + minTime;
+      const expiryTime = new Date(Date.now() + randomTime * 1000).toISOString();
+
+      console.log(`[DEBUG] Assigning card "${selectedCard}" to ${player.name}`);
+
+      try {
+        return safeRoomOperation(
+          () => room.collection('player').update(player.id, {
+            current_card: selectedCard,
+            deck_name: selectedDeck.name,
+            expires_at: expiryTime,
+            updated_at: new Date().toISOString(),
+            total_duration_ms: randomTime * 1000
+          }),
+          3,
+          10000
+        );
+      } catch (error) {
+        logError(`Failed to update player ${player.name}`, error);
+        return null;
+      }
+    });
+
+    const results = await Promise.allSettled(updatePromises);
+    const successCount = results.filter(r => r.status === 'fulfilled').length;
+
+    setCardDistributionStatus(`Cards distributed to ${successCount}/${players.length} players`);
+
+    if (isPlaying && !isEnding) {
+      const nextDistributionTime = Math.max(minTime * 1000, 15000);
+      setTimeout(() => {
+        if (isPlaying && !isEnding) {
+          distributeCards();
+        }
+      }, nextDistributionTime);
+    }
+
+    return successCount;
+  } catch (err) {
+    logError('Card distribution error', err);
+    setCardDistributionStatus(`Error distributing cards: ${err.message}`);
+    return 0;
+  }
+};
 
   // End session function
   const endSession = async () => {
