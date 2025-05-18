@@ -1,5 +1,5 @@
 // App Version for tracking
-const APP_VERSION = "1.16.0";
+const APP_VERSION = "1.17.0";
 
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
@@ -2043,6 +2043,7 @@ function PlayerView({ pin, playerName, setView }) {
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [cardVisibilityChecks, setCardVisibilityChecks] = useState(0);
   const [lastKnownCard, setLastKnownCard] = useState(null); 
+  const [forcedRefreshCount, setForcedRefreshCount] = useState(0);
   const initialSetupDone = useRef(false);
   const pollIntervalRef = useRef(null);
   const timerRef = useRef(null);
@@ -2052,6 +2053,122 @@ function PlayerView({ pin, playerName, setView }) {
   const forceUpdateInterval = useRef(null);
   const syncFailures = useRef(0);
   const cardUpdateCountRef = useRef(0); 
+  const directRenderBypassRef = useRef(null);
+
+  // NEW: Direct render bypass - emergency fix for card visibility
+  useEffect(() => {
+    // Create a direct bypass mechanism that renders the card regardless of React state
+    const createDirectBypass = () => {
+      // Only create if it doesn't exist
+      if (!directRenderBypassRef.current) {
+        const bypassElement = document.createElement('div');
+        bypassElement.id = 'emergency-card-display';
+        bypassElement.style.position = 'fixed';
+        bypassElement.style.top = '0';
+        bypassElement.style.left = '0';
+        bypassElement.style.width = '100%';
+        bypassElement.style.height = '100%';
+        bypassElement.style.backgroundColor = 'white';
+        bypassElement.style.zIndex = '10000';
+        bypassElement.style.display = 'none';
+        bypassElement.style.flexDirection = 'column';
+        bypassElement.style.justifyContent = 'center';
+        bypassElement.style.alignItems = 'center';
+        bypassElement.style.padding = '20px';
+        bypassElement.style.textAlign = 'center';
+        bypassElement.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+        
+        document.body.appendChild(bypassElement);
+        directRenderBypassRef.current = bypassElement;
+        console.log(`[${APP_VERSION}] Created emergency card display bypass element`);
+      }
+    };
+    
+    createDirectBypass();
+    
+    return () => {
+      // Clean up the bypass element on unmount
+      if (directRenderBypassRef.current) {
+        directRenderBypassRef.current.remove();
+        directRenderBypassRef.current = null;
+      }
+    };
+  }, []);
+  
+  // CRITICAL: Display card with direct DOM manipulation if React fails
+  useEffect(() => {
+    const updateEmergencyDisplay = () => {
+      if (directRenderBypassRef.current) {
+        const bypassElement = directRenderBypassRef.current;
+        
+        if (currentCard && currentCard !== 'END' && timeLeft > 0) {
+          // Only show emergency display if the regular React view isn't showing the card
+          const reactCardElement = document.querySelector('.card-text');
+          
+          if (!reactCardElement || reactCardElement.innerText !== currentCard) {
+            console.log(`[${APP_VERSION}] EMERGENCY: Activating direct card display for "${currentCard}"`);
+            
+            bypassElement.innerHTML = `
+              <div style="background-color: white; border-radius: 16px; padding: 40px 20px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); width: 90%; max-width: 500px;">
+                <h1 style="font-size: 36px; font-weight: bold; color: black; word-wrap: break-word; text-shadow: 0 0 1px rgba(0,0,0,0.1); padding: 10px; line-height: 1.4;">
+                  ${currentCard}
+                </h1>
+                
+                <div style="margin-top: 30px; text-align: center;">
+                  <span style="font-size: 48px; font-weight: bold; color: ${timeLeft < 10 ? '#ff3b30' : '#000'}">
+                    ${Math.ceil(timeLeft)}
+                  </span>
+                  <span style="font-size: 20px;"> seconds remaining</span>
+                </div>
+                
+                <div style="margin-top: 30px; width: 100%; height: 14px; background-color: #eee; border-radius: 4px; overflow: hidden;">
+                  <div style="width: ${totalTime > 0 ? Math.min(100, Math.max(0, ((totalTime - timeLeft) / totalTime) * 100)) : 0}%; height: 100%; background-color: ${timeLeft < 10 ? '#ff3b30' : '#000'}; border-radius: 4px;"></div>
+                </div>
+                
+                <p style="margin-top: 20px; font-size: 12px; color: #888;">Emergency display mode - v${APP_VERSION}</p>
+              </div>
+            `;
+            
+            bypassElement.style.display = 'flex';
+            
+            // Hide this after 5 seconds if React display recovers
+            setTimeout(() => {
+              const reactCardElement = document.querySelector('.card-text');
+              if (reactCardElement && reactCardElement.innerText === currentCard) {
+                bypassElement.style.display = 'none';
+              }
+            }, 5000);
+          } else {
+            bypassElement.style.display = 'none';
+          }
+        } else if (currentCard === 'END') {
+          bypassElement.innerHTML = `
+            <div style="background-color: white; border-radius: 16px; padding: 40px 20px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); width: 90%; max-width: 500px;">
+              <h1 style="font-size: 36px; font-weight: bold; color: black; word-wrap: break-word; text-shadow: 0 0 1px rgba(0,0,0,0.1); padding: 10px; line-height: 1.4;">
+                SESSION ENDED
+              </h1>
+              <p>Thank you for playing!</p>
+              <button style="margin-top: 20px; padding: 10px 20px; font-size: 16px; font-weight: bold; cursor: pointer; border: 2px solid black; border-radius: 8px; background-color: white;" onclick="window.location.href = window.location.origin + window.location.pathname">
+                Return to Home
+              </button>
+              <p style="margin-top: 10px; font-size: 12px; color: #888;">Emergency display mode - v${APP_VERSION}</p>
+            </div>
+          `;
+          bypassElement.style.display = 'flex';
+        } else {
+          bypassElement.style.display = 'none';
+        }
+      }
+    };
+    
+    // Update the emergency display
+    updateEmergencyDisplay();
+    
+    // Also set up an interval to periodically check if we need to activate it
+    const emergencyInterval = setInterval(updateEmergencyDisplay, 2000);
+    
+    return () => clearInterval(emergencyInterval);
+  }, [currentCard, timeLeft, totalTime]);
 
   // Setup player and initial data - ENHANCED for better card visibility
   useEffect(() => {
@@ -2264,74 +2381,48 @@ function PlayerView({ pin, playerName, setView }) {
           }
         }, 1000); 
 
-        // Check card visibility periodically and forcibly restore card if needed
-        cardCheckIntervalRef.current = setInterval(() => {
-          // Check if we should have a card visible
-          if (lastKnownCard && lastKnownCard !== 'END' && !currentCard) {
-            console.log(`[${APP_VERSION}] CRITICAL: Card should be visible but isn't! Restoring: "${lastKnownCard}"`);
-            setCurrentCard(lastKnownCard);
-            lastCardContent.current = lastKnownCard;
-          }
-          
-          if (currentCard && currentCard !== 'END' && timeLeft > 0) {
-            setCardVisibilityChecks(prev => prev + 1);
-            console.log(`[${APP_VERSION}] Card visibility check #${cardVisibilityChecks+1}: Card "${currentCard}" is active with ${timeLeft}s remaining. Updates: ${cardUpdateCountRef.current}`);
-          }
-        }, 3000);
-
-        // NEW: Force data refresh every 10 seconds to ensure synchronization
-        forceUpdateInterval.current = setInterval(async () => {
+        // NEW: More aggressive card check that forces a new poll every 1.5 seconds
+        cardCheckIntervalRef.current = setInterval(async () => {
+          // NEW: Periodically force a direct poll and refresh
           try {
-            // Only do this if we're not in a loading state
-            if (!loading) {
-              const polledPlayers = await room.collection('player')
-                .filter({ session_pin: pin, name: playerName })
-                .getList();
+            const polledPlayers = await room.collection('player')
+              .filter({ session_pin: pin, name: playerName })
+              .getList();
+              
+            if (polledPlayers && polledPlayers.length > 0) {
+              const player = polledPlayers[0];
+              
+              // Force a state update for the card regardless
+              console.log(`[${APP_VERSION}] FORCE UPDATE check: Player has card: "${player.current_card || 'NONE'}"`);
+              
+              if (player.current_card) {
+                setLastKnownCard(player.current_card);
+                lastCardContent.current = player.current_card;
+                setCurrentCard(player.current_card);
+                setForcedRefreshCount(prev => prev + 1);
                 
-              if (polledPlayers && polledPlayers.length > 0) {
-                const player = polledPlayers[0];
-                
-                // Check if the current card state matches what we have
-                if (player.current_card !== currentCard) {
-                  console.log(`[${APP_VERSION}] Force sync: Card mismatch detected. Server: "${player.current_card}", Local: "${currentCard}"`);
-                  setCurrentCard(player.current_card);
-                  setLastKnownCard(player.current_card);
-                  lastCardContent.current = player.current_card;
-                  cardUpdateCountRef.current++;
-                  syncFailures.current = 0;
-                } else {
-                  // Cards match, reset failure counter
-                  syncFailures.current = 0;
-                }
-                
-                // Update timer if needed
                 if (player.expires_at) {
                   const expiry = new Date(player.expires_at).getTime();
                   const now = Date.now();
                   const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
+                  setTimeLeft(remaining);
                   
-                  // Only update if the difference is significant
-                  if (Math.abs(remaining - timeLeft) > 2) {
-                    console.log(`[${APP_VERSION}] Force sync: Timer update needed. Server: ${remaining}s, Local: ${timeLeft}s`);
-                    setTimeLeft(remaining);
+                  // Use the total_duration_ms if available
+                  if (player.total_duration_ms) {
+                    setTotalTime(player.total_duration_ms / 1000);
                   }
                 }
-              } else {
-                syncFailures.current++;
-                console.warn(`[${APP_VERSION}] Force sync: Player not found. Failures: ${syncFailures.current}`);
-                
-                // If we have several failures in a row, attempt to recreate the player
-                if (syncFailures.current >= 3) {
-                  console.warn(`[${APP_VERSION}] Force sync: Multiple failures, attempting recovery`);
-                  syncFailures.current = 0;
-                  setRetries(prev => prev + 1); 
-                }
+              }
+              
+              if (player.current_card && player.current_card !== 'END' && timeLeft > 0) {
+                setCardVisibilityChecks(prev => prev + 1);
+                console.log(`[${APP_VERSION}] Card visibility check #${cardVisibilityChecks+1}: Card "${player.current_card}" is active with ${timeLeft}s remaining. Updates: ${cardUpdateCountRef.current}`);
               }
             }
-          } catch (e) {
-            console.error(`[${APP_VERSION}] Force sync error:`, e);
+          } catch (error) {
+            // Silent fail - this is just a backup check
           }
-        }, 10000);
+        }, 1500);
 
         // Set up subscription for real-time updates with improved error handling
         const setupPlayerSubscription = () => {
@@ -2579,13 +2670,26 @@ function PlayerView({ pin, playerName, setView }) {
     return Math.min(100, Math.max(0, percentage)); 
   };
 
-  // Force card display using last known card content if needed
+  // CRITICAL: Even more aggressive force update mechanism
   useEffect(() => {
-    if (!currentCard && lastCardContent.current && lastCardContent.current !== 'END') {
-      console.log(`[${APP_VERSION}] Restoring last known card content: "${lastCardContent.current}"`);
-      setCurrentCard(lastCardContent.current);
-    }
-  }, [currentCard]);
+    // Create an interval that forcibly rerenders every 3 seconds if we have a card
+    const forceRenderInterval = setInterval(() => {
+      if (lastKnownCard && lastKnownCard !== 'END') {
+        // Force the current card to update to the last known card
+        console.log(`[${APP_VERSION}] FORCE RENDER: Setting card to "${lastKnownCard}"`);
+        setCurrentCard(lastKnownCard);
+        
+        // Also directly update the DOM as an ultra fallback
+        const cardTextElement = document.querySelector('.card-text');
+        if (cardTextElement && cardTextElement.textContent !== lastKnownCard) {
+          console.log(`[${APP_VERSION}] DIRECT DOM UPDATE to card: "${lastKnownCard}"`);
+          cardTextElement.textContent = lastKnownCard;
+        }
+      }
+    }, 3000);
+    
+    return () => clearInterval(forceRenderInterval);
+  }, [lastKnownCard]);
 
   if (loading) {
     return (
@@ -2656,14 +2760,17 @@ function PlayerView({ pin, playerName, setView }) {
   }
 
   // ENHANCED Card display rendering with alerts for debugging
-  console.log(`[${APP_VERSION}] Rendering card: "${currentCard || 'NO CARD'}"`);
+  console.log(`[${APP_VERSION}] Rendering card: "${currentCard || 'NO CARD'}", Timer: ${timeLeft}s, Updates: ${cardUpdateCountRef.current}, Forced: ${forcedRefreshCount}`);
+
+  // NEW: Force display of card from lastKnownCard if current is null but we should have one
+  const displayCard = currentCard || lastKnownCard;
 
   return (
-    <div style={{ height: '100vh', position: 'relative' }}>
-      {currentCard ? (
-        <div className="fullscreen-card">
+    <div style={{ height: '100vh', position: 'relative' }} id="player-view-container">
+      {displayCard && displayCard !== 'END' ? (
+        <div className="fullscreen-card" id="card-display">
           <div style={{ width: '100%' }}>
-            <h1 className="card-text" style={{ fontSize: '36px', padding: '10px' }}>{currentCard}</h1>
+            <h1 className="card-text" style={{ fontSize: '36px', padding: '10px' }}>{displayCard}</h1>
             
             <div style={{ marginTop: '30px', textAlign: 'center' }}>
               <span style={{ 
@@ -2687,9 +2794,19 @@ function PlayerView({ pin, playerName, setView }) {
               ></div>
             </div>
             
+            {/* Card status indicator */}
+            <div style={{ 
+              marginTop: '20px', 
+              fontSize: '12px', 
+              color: '#888',
+              textAlign: 'center' 
+            }}>
+              {forcedRefreshCount > 0 ? `Card restored ${forcedRefreshCount} times` : 'Card received normally'}
+            </div>
+            
             {/* Hidden debug link that shows more info when double-clicked */}
             <div 
-              onDoubleClick={() => alert(`Debug: Card="${currentCard}", Time=${timeLeft}s, Total=${totalTime}s, Last received=${debugInfo.lastCardReceived}, PlayerId=${debugInfo.playerId || 'unknown'}, Status=${connectionStatus}, Updates=${cardUpdateCountRef.current}`)}
+              onDoubleClick={() => alert(`Debug: Card="${displayCard}", Time=${timeLeft}s, Total=${totalTime}s, Last received=${debugInfo.lastCardReceived}, PlayerId=${debugInfo.playerId || 'unknown'}, Status=${connectionStatus}, Updates=${cardUpdateCountRef.current}`)}
               style={{ fontSize: '10px', color: '#fff', position: 'absolute', bottom: '5px', right: '5px', cursor: 'default' }}
             >
               v{APP_VERSION}
@@ -2713,6 +2830,19 @@ function PlayerView({ pin, playerName, setView }) {
             <p style={{ marginTop: '10px', fontSize: '12px', color: '#888' }}>
               Version: {APP_VERSION}
             </p>
+            
+            {/* Last known card status for debugging */}
+            {lastKnownCard && (
+              <p style={{ marginTop: '15px', fontSize: '12px', color: '#888' }}>
+                <button onClick={() => {
+                  console.log(`[${APP_VERSION}] Manual restore of card: "${lastKnownCard}"`);
+                  setCurrentCard(lastKnownCard);
+                  setForcedRefreshCount(prev => prev + 1);
+                }} className="btn btn-small">
+                  Force Restore Card
+                </button>
+              </p>
+            )}
           </div>
         </div>
       )}

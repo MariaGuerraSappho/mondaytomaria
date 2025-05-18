@@ -125,8 +125,60 @@
 </head>
 <body>
   <!-- Loading indicator displayed until React mounts -->
-  <div id="loading">Loading Improv Card Distributor v1.16.0...</div>
+  <div id="loading">Loading Improv Card Distributor v1.17.0...</div>
   <div id="root"></div>
+  
+  <!-- Emergency fallback system for player cards -->
+  <script>
+    // Ultra-reliable fallback system to ensure player cards always display
+    window.addEventListener('load', function() {
+      const checkCardRendering = function() {
+        // On the player view check if cards are rendering
+        if (window.location.search.includes('pin=')) {
+          setTimeout(function() {
+            // Check if we have a card element but no text
+            const cardElement = document.querySelector('.card-text');
+            const mainContainer = document.querySelector('#root');
+            
+            if (mainContainer && (!cardElement || cardElement.textContent === "")) {
+              console.log('[EMERGENCY] Card rendering verification failed - activating DOM inspector');
+              
+              // Log the actual DOM for debugging
+              console.log('Current DOM structure:', mainContainer.innerHTML);
+              
+              // If app mounted but card area is empty, try emergency refresh
+              if (!document.getElementById('player-emergency-refresh')) {
+                const refreshButton = document.createElement('button');
+                refreshButton.id = 'player-emergency-refresh';
+                refreshButton.innerText = 'Card Display Issue Detected - Click to Refresh';
+                refreshButton.style.position = 'fixed';
+                refreshButton.style.bottom = '20px';
+                refreshButton.style.left = '50%';
+                refreshButton.style.transform = 'translateX(-50%)';
+                refreshButton.style.padding = '10px 15px';
+                refreshButton.style.backgroundColor = '#ff3b30';
+                refreshButton.style.color = 'white';
+                refreshButton.style.fontWeight = 'bold';
+                refreshButton.style.borderRadius = '8px';
+                refreshButton.style.border = 'none';
+                refreshButton.style.cursor = 'pointer';
+                refreshButton.style.zIndex = '10000';
+                
+                refreshButton.onclick = function() {
+                  window.location.reload();
+                };
+                
+                document.body.appendChild(refreshButton);
+              }
+            }
+          }, 5000); // Check 5 seconds after load
+        }
+      };
+      
+      checkCardRendering();
+    });
+  </script>
+  
   <script type="text/babel" src="app.js"></script>
 </body>
 </html>
