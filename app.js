@@ -1,5 +1,5 @@
 // App Version for tracking
-const APP_VERSION = "1.13.0";
+const APP_VERSION = "1.14.0";
 
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
@@ -686,14 +686,22 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 
       setCardDistributionStatus(`Distributing cards from "${selectedDeck.name}" to ${players.length} players...`);
 
+      // PRE-SELECT THE CARD FOR UNISON MODE BEFORE THE PLAYER LOOP
+      let unisonCard = null;
+      if (mode === 'unison') {
+        // Everyone gets the same card - select it once outside the loop
+        unisonCard = cardsPool[Math.floor(Math.random() * cardsPool.length)];
+        console.log(`[${APP_VERSION}] Unison mode: Selected card "${unisonCard}" for all players`);
+      }
+
       // Distribute cards based on mode
       const updatePromises = players.map(async (player) => {
         let selectedCard;
         
         switch (mode) {
           case 'unison':
-            // Everyone gets the same card
-            selectedCard = cardsPool[Math.floor(Math.random() * cardsPool.length)];
+            // Use the pre-selected card for all players
+            selectedCard = unisonCard;
             break;
           case 'unique':
             // Everyone gets a different card if possible
@@ -740,7 +748,8 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             () => room.collection('player').update(player.id, {
               current_card: selectedCard,
               expires_at: expiryTime,
-              updated_at: new Date().toISOString()
+              updated_at: new Date().toISOString(),
+              total_duration_ms: randomTime * 1000 // Add total duration for better progress calculation
             }),
             3,
             10000
@@ -775,52 +784,115 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     }
   };
 
-  // End session function
+  // End session function - COMPLETELY REWRITTEN FOR RELIABILITY
   const endSession = async () => {
     setCardDistributionStatus('Ending session...');
+    
+    // Immediately stop any ongoing activity
+    setIsPlaying(false);
     setIsEnding(true);
     
     try {
-      // First update session state to stop new distributions
+      // Force-stop the session first before any player updates to prevent race conditions
       if (sessionData && sessionData.id) {
-        await safeRoomOperation(() =>
-          room.collection('session').update(sessionData.id, {
-            is_playing: false,
-            is_ending: true,
-            last_updated: new Date().toISOString()
-          })
-        );
+        console.log(`[${APP_VERSION}] Ending session: Updating session state to stopped`);
+        await room.collection('session').update(sessionData.id, {
+          is_playing: false,
+          is_ending: true,
+          last_updated: new Date().toISOString()
+        });
       }
       
-      // Then update all players with END card
-      const updatePromises = players.map(player => 
-        safeRoomOperation(
-          () => room.collection('player').update(player.id, {
-            current_card: 'END',
-            expires_at: null,
-            updated_at: new Date().toISOString()
-          }),
-          3,
-          8000
-        )
-      );
+      // Use a more direct approach for ending - don't rely on Promise.allSettled
+      // Update players one by one with forced retries
+      setCardDistributionStatus('Sending END signal to players...');
       
-      await Promise.allSettled(updatePromises);
+      for (const player of players) {
+        try {
+          console.log(`[${APP_VERSION}] Ending session: Sending END to ${player.name}`);
+          // More aggressive timeout and retries for critical end operation
+          await safeRoomOperation(
+            () => room.collection('player').update(player.id, {
+              current_card: 'END',
+              expires_at: null,
+              updated_at: new Date().toISOString()
+            }),
+            5, // More retries
+            10000 // Longer timeout
+          );
+        } catch (playerErr) {
+          console.error(`[${APP_VERSION}] Failed to end session for ${player.name}:`, playerErr);
+          // Continue with other players even if one fails
+        }
+      }
       
-      // Then finalize session end state
+      // Verify players are actually updated
+      setCardDistributionStatus('Confirming all players received END signal...');
+      
+      try {
+        // Get fresh player data to confirm updates
+        const updatedPlayers = await room.collection('player')
+          .filter({ session_pin: pin })
+          .getList();
+        
+        const endedCount = updatedPlayers.filter(p => p.current_card === 'END').length;
+        console.log(`[${APP_VERSION}] End confirmation: ${endedCount}/${updatedPlayers.length} players marked as ended`);
+        
+        // If any players weren't updated, try again just for them
+        if (endedCount < updatedPlayers.length) {
+          const notEndedPlayers = updatedPlayers.filter(p => p.current_card !== 'END');
+          
+          for (const player of notEndedPlayers) {
+            try {
+              console.log(`[${APP_VERSION}] Retry ending for ${player.name}`);
+              await room.collection('player').update(player.id, {
+                current_card: 'END',
+                expires_at: null,
+                updated_at: new Date().toISOString()
+              });
+            } catch (retryErr) {
+              // Just log and continue
+              console.error(`[${APP_VERSION}] Retry failed for ${player.name}:`, retryErr);
+            }
+          }
+        }
+      } catch (verifyErr) {
+        console.error(`[${APP_VERSION}] End verification failed:`, verifyErr);
+        // Continue with session finalization regardless
+      }
+      
+      // Final session state update
       if (sessionData && sessionData.id) {
         await safeRoomOperation(() =>
           room.collection('session').update(sessionData.id, {
             is_playing: false,
             is_ending: false,
             last_updated: new Date().toISOString()
-          })
+          }),
+          3,
+          8000
         );
       }
       
       setCardDistributionStatus('Session ended successfully');
       setIsPlaying(false);
       setIsEnding(false);
+      
+      // Force refresh player list to show final state
+      setTimeout(async () => {
+        try {
+          const finalPlayers = await room.collection('player')
+            .filter({ session_pin: pin })
+            .getList();
+          
+          if (finalPlayers) {
+            setPlayers(finalPlayers);
+          }
+        } catch (err) {
+          // Ignore
+        }
+      }, 1000);
+      
     } catch (err) {
       logError('End session error', err);
       setCardDistributionStatus(`Error ending session: ${err.message}`);
@@ -829,7 +901,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       setIsPlaying(false);
       setIsEnding(false);
       
-      // Try one more time with simpler approach
+      // Try one more time with absolutely minimal approach
       try {
         if (sessionData && sessionData.id) {
           await room.collection('session').update(sessionData.id, {
@@ -837,214 +909,16 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             is_ending: false
           });
         }
+        
+        // Direct database calls without error handling for last-ditch effort
+        for (const player of players) {
+          try {
+            room.collection('player').update(player.id, { current_card: 'END', expires_at: null });
+          } catch (e) {} // Intentionally empty catch
+        }
       } catch (finalErr) {
         // Ignore final attempt errors
       }
-    }
-  };
-
-  // Ultra-reliable deck creation with chunking, timeouts based on network quality
-  const createDeck = async (name, cardsText) => {
-    if (!name.trim()) {
-      setError('Please enter a deck name');
-      return false;
-    }
-
-    let cards = [];
-    if (typeof cardsText === 'string') {
-      cards = cardsText
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0);
-    } else if (Array.isArray(cardsText)) {
-      cards = cardsText.filter(card => card && typeof card === 'string' && card.trim().length > 0);
-    } else {
-      setError('Invalid card format');
-      return false;
-    }
-
-    if (cards.length === 0) {
-      setError('No valid cards found. Please add at least one card.');
-      return false;
-    }
-
-    setLoading(true);
-    setError(null);
-    
-    // Create a unique operation ID
-    const opId = Date.now() + Math.random().toString(36).substr(2, 5);
-    setDeckOperationId(opId);
-    
-    // Add to optimistic list immediately
-    const optimisticDeck = {
-      id: `temp-${opId}`,
-      session_pin: pin,
-      name: name,
-      cards: cards,
-      _isOptimistic: true,
-      _opId: opId,
-      created_at: new Date().toISOString()
-    };
-    
-    setOptimisticDecks(prev => [...prev, optimisticDeck]);
-    setProcessingQueue(prev => [...prev, opId]);
-    
-    // Set appropriate timeout based on network quality and payload size
-    let timeoutMs = 20000; // Default 20 seconds
-    if (networkQuality === 'poor') {
-      timeoutMs = Math.max(30000, cards.length * 100); // At least 30 seconds for poor networks
-    } else if (networkQuality === 'fair') {
-      timeoutMs = Math.max(20000, cards.length * 50); // At least 20 seconds for fair networks
-    } else {
-      timeoutMs = Math.max(15000, cards.length * 25); // At least 15 seconds for good networks
-    }
-    
-    const maxRetries = networkQuality === 'poor' ? 5 : 3;
-    
-    setDeckCreationStatus(`Creating deck "${name}" with ${cards.length} cards...`);
-    
-    try {
-      let newDeck = null;
-      
-      // For very large decks, use chunking (over 500 cards)
-      if (cards.length > 500 && networkQuality !== 'good') {
-        setDeckCreationStatus(`Large deck detected (${cards.length} cards). Using chunked processing...`);
-        
-        // Create deck with initial chunk
-        const initialChunk = cards.slice(0, 100);
-        const deckData = {
-          session_pin: pin,
-          name: name,
-          cards: initialChunk,
-          created_at: new Date().toISOString(),
-          version: APP_VERSION,
-          client_id: opId,
-          is_chunked: true,
-          total_cards: cards.length
-        };
-        
-        reportStatus('ConductorView', 'Creating chunked deck', {
-          deck_name: name,
-          initial_chunk: initialChunk.length,
-          total_cards: cards.length,
-          op_id: opId
-        });
-        
-        newDeck = await safeRoomOperation(
-          () => room.collection('deck').create(deckData),
-          maxRetries,
-          timeoutMs
-        );
-        
-        // Process remaining chunks
-        const remainingCards = cards.slice(100);
-        const chunkSize = 100;
-        
-        for (let i = 0; i < remainingCards.length; i += chunkSize) {
-          const chunk = remainingCards.slice(i, i + chunkSize);
-          const chunkNumber = Math.floor(i / chunkSize) + 1;
-          const totalChunks = Math.ceil(remainingCards.length / chunkSize);
-          
-          setDeckCreationStatus(`Processing chunk ${chunkNumber}/${totalChunks} (${chunk.length} cards)...`);
-          
-          await safeRoomOperation(
-            () => room.collection('deck').update(newDeck.id, {
-              cards: [...(newDeck.cards || []), ...chunk],
-              last_updated: new Date().toISOString(),
-              _chunk: chunkNumber
-            }),
-            maxRetries,
-            timeoutMs
-          );
-          
-          // Update our local reference to include the new cards
-          newDeck.cards = [...(newDeck.cards || []), ...chunk];
-          
-          reportStatus('ConductorView', `Chunk ${chunkNumber} processed`, {
-            deck_id: newDeck.id,
-            cards_processed: (100 + i + chunk.length),
-            remaining: cards.length - (100 + i + chunk.length)
-          });
-        }
-      } else {
-        // Standard deck creation for normal-sized decks
-        const deckData = {
-          session_pin: pin,
-          name: name,
-          cards: cards,
-          created_at: new Date().toISOString(),
-          version: APP_VERSION,
-          client_id: opId
-        };
-        
-        reportStatus('ConductorView', 'Creating deck', {
-          deck_name: name,
-          cards_count: cards.length,
-          op_id: opId,
-          timeout: timeoutMs
-        });
-        
-        newDeck = await safeRoomOperation(
-          () => room.collection('deck').create(deckData),
-          maxRetries,
-          timeoutMs
-        );
-      }
-      
-      if (!newDeck) {
-        throw new Error('Deck creation returned empty result');
-      }
-      
-      reportStatus('ConductorView', 'Deck created successfully', {
-        deck_id: newDeck.id,
-        cards_count: newDeck.cards?.length || 0,
-        op_id: opId
-      });
-      
-      // Remove from optimistic list and add to real list
-      setOptimisticDecks(prev => prev.filter(d => d._opId !== opId));
-      setProcessingQueue(prev => prev.filter(id => id !== opId));
-      
-      setDecks(prevDecks => {
-        const deckWithMeta = {
-          ...newDeck,
-          _localAdded: new Date().toISOString(),
-          _opId: opId
-        };
-        
-        // Avoid duplicates by removing any with same ID
-        const filteredDecks = prevDecks.filter(d => d.id !== newDeck.id);
-        const updatedDecks = [...filteredDecks, deckWithMeta];
-        console.log(`[${APP_VERSION}] Updated decks array locally:`, updatedDecks.length);
-        return updatedDecks;
-      });
-      
-      if (!currentDeck) {
-        setCurrentDeck(newDeck.id);
-      }
-      
-      setDeckCreationStatus(`Success! "${name}" deck added with ${cards.length} cards`);
-      
-      // Schedule multiple refreshes to ensure consistency
-      setTimeout(() => refreshDecksList(true), 500);
-      setTimeout(() => refreshDecksList(true), 2500);
-      setTimeout(() => refreshDecksList(true), 7000);
-      
-      return true;
-    } catch (err) {
-      console.error(`[${APP_VERSION}] Final deck creation error:`, err);
-      
-      // Remove from processing queue but keep in optimistic list with error state
-      setProcessingQueue(prev => prev.filter(id => id !== opId));
-      setOptimisticDecks(prev => prev.map(d => 
-        d._opId === opId ? {...d, _error: true, _errorMsg: err.message} : d
-      ));
-      
-      setError(`Failed to create deck: ${err.message || 'Unknown error'}`);
-      setDeckCreationStatus('Error creating deck. You can try again with a smaller deck size.');
-      return false;
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -1916,14 +1790,17 @@ function PlayerView({ pin, playerName, setView }) {
   const [loading, setLoading] = useState(true);
   const [retries, setRetries] = useState(0);
   const [connectionStatus, setConnectionStatus] = useState('connecting');
-  const [debugInfo, setDebugInfo] = useState({ lastAction: '', playerFound: false });
+  const [debugInfo, setDebugInfo] = useState({ lastAction: '', playerFound: false, lastCardReceived: 'none' });
   const [lastCardUpdate, setLastCardUpdate] = useState(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [cardVisibilityChecks, setCardVisibilityChecks] = useState(0);
   const initialSetupDone = useRef(false);
   const pollIntervalRef = useRef(null);
   const timerRef = useRef(null);
   const lastTimeRef = useRef(0);
+  const cardCheckIntervalRef = useRef(null);
 
+  // Setup player and initial data
   useEffect(() => {
     if (initialSetupDone.current) return;
     
@@ -1965,11 +1842,20 @@ function PlayerView({ pin, playerName, setView }) {
             
             if (players && players.length > 0) {
               setPlayerId(players[0].id);
-              setDebugInfo(prev => ({ ...prev, playerFound: true }));
+              setDebugInfo(prev => ({ 
+                ...prev, 
+                playerFound: true,
+                playerId: players[0].id
+              }));
               
               // Immediately set current card if player has one
               if (players[0].current_card) {
+                console.log(`[${APP_VERSION}] Initial card received: "${players[0].current_card}"`);
                 setCurrentCard(players[0].current_card);
+                setDebugInfo(prev => ({ 
+                  ...prev, 
+                  lastCardReceived: players[0].current_card || 'none'
+                }));
                 setLastCardUpdate(Date.now());
                 
                 if (players[0].expires_at) {
@@ -2016,7 +1902,11 @@ function PlayerView({ pin, playerName, setView }) {
                 
                 reportStatus('PlayerView', 'Created new player', { id: newPlayer.id });
                 setPlayerId(newPlayer.id);
-                setDebugInfo(prev => ({ ...prev, playerFound: true }));
+                setDebugInfo(prev => ({ 
+                  ...prev, 
+                  playerFound: true,
+                  playerId: newPlayer.id
+                }));
                 break;
               } catch (createErr) {
                 logError(`Player creation attempt ${findAttempt+1} failed`, createErr);
@@ -2046,7 +1936,7 @@ function PlayerView({ pin, playerName, setView }) {
         initialSetupDone.current = true;
         reportStatus('PlayerView', 'Player setup complete', { id: playerId });
 
-        // More aggressive polling for better reliability
+        // NEW: More frequent and more aggressive polling for better reliability
         pollIntervalRef.current = setInterval(async () => {
           try {
             const polledPlayers = await room.collection('player')
@@ -2056,29 +1946,35 @@ function PlayerView({ pin, playerName, setView }) {
             if (polledPlayers && polledPlayers.length > 0) {
               const player = polledPlayers[0];
               
+              // Enhanced logging to track card updates
+              if (player.current_card !== currentCard) {
+                console.log(`[${APP_VERSION}] Poll received updated card: "${player.current_card}" (was: "${currentCard}")`);
+              }
+              
               // Always update the card if one exists
               if (player.current_card) {
-                // Only update if card has changed or there's been enough time
-                const cardChanged = player.current_card !== currentCard;
-                const timeToUpdate = !lastCardUpdate || (Date.now() - lastCardUpdate > 5000);
+                // Update card state and record receipt
+                setCurrentCard(player.current_card);
+                setLastCardUpdate(Date.now());
+                setDebugInfo(prev => ({ 
+                  ...prev, 
+                  lastAction: `Card poll update: ${player.current_card || 'no card'}`,
+                  lastCardReceived: player.current_card
+                }));
                 
-                if (cardChanged || timeToUpdate) {
-                  setCurrentCard(player.current_card);
-                  setLastCardUpdate(Date.now());
-                  setDebugInfo(prev => ({ 
-                    ...prev, 
-                    lastAction: `Card poll update: ${player.current_card || 'no card'}`
-                  }));
+                if (player.expires_at) {
+                  const expiry = new Date(player.expires_at).getTime();
+                  const now = Date.now();
+                  const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
+                  setTimeLeft(remaining);
                   
-                  if (player.expires_at) {
-                    const expiry = new Date(player.expires_at).getTime();
-                    const now = Date.now();
-                    const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
-                    setTimeLeft(remaining);
-                    
-                    // Get total time from session for better progress visualization
-                    try {
-                      const sessions = await room.collection('session').filter({ pin }).getList();
+                  // Use the total_duration_ms if available
+                  if (player.total_duration_ms) {
+                    setTotalTime(player.total_duration_ms / 1000);
+                  }
+                  // Calculate total time from expires_at and session settings (if available)
+                  else if (totalTime <= 0) {
+                    room.collection('session').filter({ pin }).getList().then(sessions => {
                       if (sessions && sessions.length > 0) {
                         const session = sessions[0];
                         const avgTime = (session.min_time + session.max_time) / 2;
@@ -2086,9 +1982,9 @@ function PlayerView({ pin, playerName, setView }) {
                       } else {
                         setTotalTime(Math.max(remaining + 5, 30)); // Fallback
                       }
-                    } catch (err) {
+                    }).catch(() => {
                       setTotalTime(Math.max(remaining + 5, 30)); // Fallback on error
-                    }
+                    });
                   }
                 }
               }
@@ -2096,7 +1992,16 @@ function PlayerView({ pin, playerName, setView }) {
           } catch (pollErr) {
             // Silent fail for polling - it's just a backup
           }
-        }, 3000); // More frequent polling
+        }, 2000); // Even more frequent polling (every 2 seconds)
+
+        // NEW: Check card visibility periodically
+        cardCheckIntervalRef.current = setInterval(() => {
+          // Check if we should have a card visible
+          if (currentCard && currentCard !== 'END' && timeLeft > 0) {
+            setCardVisibilityChecks(prev => prev + 1);
+            console.log(`[${APP_VERSION}] Card visibility check #${cardVisibilityChecks+1}: Card "${currentCard}" is active with ${timeLeft}s remaining`);
+          }
+        }, 5000);
 
         // Set up subscription for real-time updates
         const setupPlayerSubscription = () => {
@@ -2114,11 +2019,18 @@ function PlayerView({ pin, playerName, setView }) {
                 .subscribe(playersList => {
                   if (playersList && playersList.length > 0) {
                     const player = playersList[0];
+                    
+                    // Enhanced logging to track card updates
+                    if (player.current_card !== currentCard) {
+                      console.log(`[${APP_VERSION}] Subscription received updated card: "${player.current_card}" (was: "${currentCard}")`);
+                    }
+                    
                     setCurrentCard(player.current_card);
                     setLastCardUpdate(Date.now());
                     setDebugInfo(prev => ({ 
                       ...prev, 
-                      lastAction: `Player update: ${player.current_card || 'no card'}`
+                      lastAction: `Player update: ${player.current_card || 'no card'}`,
+                      lastCardReceived: player.current_card
                     }));
 
                     if (player.expires_at) {
@@ -2127,11 +2039,16 @@ function PlayerView({ pin, playerName, setView }) {
                       const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
                       setTimeLeft(remaining);
                       
+                      // Use the total_duration_ms if available
+                      if (player.total_duration_ms) {
+                        setTotalTime(player.total_duration_ms / 1000);
+                      }
                       // Calculate total time from expires_at and session settings (if available)
-                      if (totalTime <= 0) {
+                      else if (totalTime <= 0) {
                         room.collection('session').filter({ pin }).getList().then(sessions => {
                           if (sessions && sessions.length > 0) {
-                            const avgTime = (sessions[0].min_time + sessions[0].max_time) / 2;
+                            const session = sessions[0];
+                            const avgTime = (session.min_time + session.max_time) / 2;
                             setTotalTime(avgTime);
                           } else {
                             setTotalTime(Math.max(remaining + 5, 30)); // Fallback
@@ -2188,56 +2105,12 @@ function PlayerView({ pin, playerName, setView }) {
       if (timerRef.current) {
         clearInterval(timerRef.current);
       }
+      
+      if (cardCheckIntervalRef.current) {
+        clearInterval(cardCheckIntervalRef.current);
+      }
     };
   }, [pin, playerName, retries]);
-
-  // Subscribe to session changes
-  useEffect(() => {
-    if (pin) {
-      const subscribeToSession = () => {
-        let retryAttempt = 0;
-        const maxRetries = 10;
-        
-        const attemptSubscribe = () => {
-          if (retryAttempt >= maxRetries) return () => {};
-          
-          try {
-            reportStatus('PlayerView', 'Subscribing to session', { 
-              attempt: retryAttempt + 1 
-            });
-            
-            return room.collection('session')
-              .filter({ pin })
-              .subscribe(sessionsList => {
-                if (sessionsList && sessionsList.length > 0) {
-                  const session = sessionsList[0];
-                  setIsSessionActive(session.is_playing);
-                  
-                  if (session.min_time && session.max_time) {
-                    const avgSessionTime = (session.min_time + session.max_time) / 2;
-                    if (!totalTime || avgSessionTime > totalTime) {
-                      setTotalTime(avgSessionTime);
-                    }
-                  }
-                } else {
-                  setError('Session not found');
-                }
-              });
-          } catch (subErr) {
-            logError(`Error subscribing to session (attempt ${retryAttempt + 1})`, subErr);
-            
-            retryAttempt++;
-            setTimeout(() => attemptSubscribe(), Math.min(1000 * retryAttempt, 10000));
-            return () => {};
-          }
-        };
-        
-        return attemptSubscribe();
-      };
-      
-      return subscribeToSession();
-    }
-  }, [pin]);
 
   // Improved timer logic for smoother countdown
   useEffect(() => {
@@ -2452,6 +2325,14 @@ function PlayerView({ pin, playerName, setView }) {
                   backgroundColor: timeLeft < 10 ? '#ff3b30' : '#000'
                 }}
               ></div>
+            </div>
+            
+            {/* Hidden debug link that shows more info when double-clicked */}
+            <div 
+              onDoubleClick={() => alert(`Debug: Card="${currentCard}", Time=${timeLeft}s, Last received=${debugInfo.lastCardReceived}, PlayerId=${debugInfo.playerId || 'unknown'}, Status=${connectionStatus}`)}
+              style={{ fontSize: '10px', color: '#fff', position: 'absolute', bottom: '5px', right: '5px', cursor: 'default' }}
+            >
+              v{APP_VERSION}
             </div>
           </div>
         </div>
