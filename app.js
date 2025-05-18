@@ -1,5 +1,5 @@
 // App Version for tracking
-const APP_VERSION = "1.14.0";
+const APP_VERSION = "1.14.1";
 
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
@@ -1157,8 +1157,190 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     }
   };
 
-  // Get the currently selected deck
-  const selectedDeck = displayDecks.find(deck => deck.id === currentDeck);
+  // Define the missing createDeck function
+  const createDeck = async (name, cardsInput) => {
+    if (!pin) {
+      setError('Session PIN not available. Please refresh the page.');
+      return false;
+    }
+
+    if (!name || name.trim() === '') {
+      setError('Deck name is required');
+      return false;
+    }
+
+    setLoading(true);
+    setError(null);
+    setDeckCreationStatus(`Processing deck "${name}"...`);
+
+    try {
+      // Process the cards input (can be array or string)
+      let cards = [];
+      
+      if (Array.isArray(cardsInput)) {
+        // If input is already an array, use it directly
+        cards = cardsInput.filter(card => card && typeof card === 'string' && card.trim() !== '');
+      } else if (typeof cardsInput === 'string') {
+        // If input is a string, split by newlines and filter empty lines
+        cards = cardsInput.split('\n')
+          .map(line => line.trim())
+          .filter(line => line !== '');
+      } else {
+        throw new Error('Invalid cards format');
+      }
+
+      if (cards.length === 0) {
+        setDeckCreationStatus('Error: No valid cards found in input');
+        setError('No valid cards found. Please add at least one card.');
+        setLoading(false);
+        return false;
+      }
+
+      // Create a unique operation ID for tracking this creation
+      const opId = `op_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      
+      // Add optimistic deck to UI immediately
+      const optimisticDeck = {
+        id: `temp_${opId}`,
+        _opId: opId,
+        name: name,
+        cards: cards,
+        session_pin: pin,
+        _isOptimistic: true,
+        created_at: new Date().toISOString()
+      };
+      
+      setOptimisticDecks(prev => [...prev, optimisticDeck]);
+      setProcessingQueue(prev => [...prev, opId]);
+      
+      setDeckCreationStatus(`Creating deck "${name}" with ${cards.length} cards...`);
+      
+      // Actually create the deck in the database
+      const newDeck = await safeRoomOperation(
+        () => room.collection('deck').create({
+          name: name,
+          cards: cards,
+          session_pin: pin,
+          card_count: cards.length,
+          operation_id: opId,
+          created_at: new Date().toISOString()
+        }),
+        3,
+        20000
+      );
+      
+      // Update optimistic state
+      setProcessingQueue(prev => prev.filter(id => id !== opId));
+      setOptimisticDecks(prev => prev.filter(deck => deck._opId !== opId));
+      
+      // Update decks list
+      setDecks(prev => {
+        const updated = [...prev];
+        const existingIndex = updated.findIndex(d => d.name === name);
+        
+        if (existingIndex >= 0) {
+          updated[existingIndex] = newDeck;
+        } else {
+          updated.push(newDeck);
+        }
+        
+        return updated;
+      });
+      
+      // Set current deck to the new one if it's the first deck
+      if (!currentDeck && decks.length === 0) {
+        setCurrentDeck(newDeck.id);
+      }
+      
+      setDeckCreationStatus(`Deck "${name}" created successfully with ${cards.length} cards!`);
+      
+      // Record it locally too
+      try {
+        const deckToSave = {
+          name: name,
+          cards: cards,
+          saved_at: new Date().toISOString()
+        };
+        
+        // Check if it already exists in saved decks
+        const exists = savedDecks.some(saved => 
+          saved.name === name && 
+          JSON.stringify(saved.cards) === JSON.stringify(cards)
+        );
+        
+        if (!exists) {
+          const updatedSavedDecks = [...savedDecks, deckToSave];
+          setSavedDecks(updatedSavedDecks);
+          localStorage.setItem('savedDecks', JSON.stringify(updatedSavedDecks));
+          console.log(`[${APP_VERSION}] Saved deck "${name}" locally`);
+        }
+      } catch (saveErr) {
+        console.warn(`[${APP_VERSION}] Could not save deck locally:`, saveErr);
+        // Non-critical error, just log it
+      }
+      
+      setLoading(false);
+      return true;
+    } catch (err) {
+      setLoading(false);
+      
+      // Update optimistic state to show error
+      const opId = optimisticDecks.find(d => d.name === name)?._opId;
+      if (opId) {
+        setProcessingQueue(prev => prev.filter(id => id !== opId));
+        setOptimisticDecks(prev => prev.map(deck => 
+          deck.name === name ? { ...deck, _error: true, _errorMsg: err.message } : deck
+        ));
+      }
+      
+      const errorMsg = logError(`Failed to create deck "${name}"`, err);
+      setError(`Upload error: ${errorMsg}`);
+      setDeckCreationStatus(`Error creating deck: ${errorMsg}`);
+      return false;
+    }
+  };
+
+  // Add a new function to upload all saved decks at once
+  const uploadAllSavedDecks = async () => {
+    if (savedDecks.length === 0) {
+      setDeckCreationStatus('No saved decks to upload');
+      return;
+    }
+
+    setLoading(true);
+    setDeckCreationStatus(`Uploading ${savedDecks.length} saved decks...`);
+    
+    let successCount = 0;
+    let errorCount = 0;
+    
+    for (let i = 0; i < savedDecks.length; i++) {
+      const deck = savedDecks[i];
+      setDeckCreationStatus(`Uploading deck ${i+1}/${savedDecks.length}: "${deck.name}"`);
+      
+      try {
+        const success = await createDeck(deck.name, deck.cards);
+        if (success) {
+          successCount++;
+        } else {
+          errorCount++;
+        }
+        
+        // Small delay between uploads to avoid overwhelming the server
+        if (i < savedDecks.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      } catch (err) {
+        errorCount++;
+        console.error(`[${APP_VERSION}] Error uploading saved deck "${deck.name}":`, err);
+      }
+    }
+    
+    setLoading(false);
+    setDeckCreationStatus(`Upload complete! Added ${successCount} deck${successCount !== 1 ? 's' : ''}, failed ${errorCount}`);
+    
+    // Refresh the decks list to show the newly added decks
+    setTimeout(() => refreshDecksList(true), 1000);
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -1277,60 +1459,77 @@ function ConductorView({ setView, sessionData, setSessionData }) {
               {savedDecks.length === 0 ? (
                 <p>No saved decks yet. Save decks to reuse them later.</p>
               ) : (
-                savedDecks.map((deck, index) => (
-                  <div key={index} style={{ 
-                    display: 'flex', 
-                    justifyContent: 'space-between', 
-                    alignItems: 'center',
-                    padding: '8px',
-                    borderBottom: index < savedDecks.length - 1 ? '1px solid #eee' : 'none'
-                  }}>
-                    <div>
-                      <strong>{deck.name}</strong> ({deck.cards.length} cards)
-                    </div>
-                    <div>
-                      <button 
-                        className="btn"
-                        onClick={() => {
-                          setDeckCreationStatus(`Loading deck "${deck.name}"...`);
-                          createDeck(deck.name, deck.cards).then(success => {
-                            if (success) {
-                              setShowSavedDecks(false);
-                              setDeckCreationStatus(`Deck "${deck.name}" loaded successfully`);
-                              setTimeout(() => refreshDecksList(true), 1000);
-                              setTimeout(() => refreshDecksList(true), 3000);
-                            }
-                          });
-                        }}
-                        style={{ 
-                          marginRight: '5px', 
-                          padding: '5px 10px',
-                          backgroundColor: '#000',
-                          color: '#fff'
-                        }}
-                      >
-                        Load
-                      </button>
-                      <button 
-                        className="btn"
-                        onClick={() => {
-                          try {
-                            const updatedDecks = savedDecks.filter((_, i) => i !== index);
-                            setSavedDecks(updatedDecks);
-                            localStorage.setItem('savedDecks', JSON.stringify(updatedDecks));
-                            setDeckCreationStatus('Saved deck removed');
-                            setTimeout(() => setDeckCreationStatus(''), 2000);
-                          } catch (err) {
-                            console.error(`[${APP_VERSION}] Error removing saved deck:`, err);
-                          }
-                        }}
-                        style={{ padding: '5px 10px' }}
-                      >
-                        Remove
-                      </button>
-                    </div>
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
+                    <strong>{savedDecks.length} Saved Deck{savedDecks.length !== 1 ? 's' : ''}</strong>
+                    <button 
+                      className="btn btn-small"
+                      onClick={uploadAllSavedDecks}
+                      disabled={loading}
+                      style={{ 
+                        padding: '5px 10px',
+                        backgroundColor: '#000',
+                        color: '#fff'
+                      }}
+                    >
+                      Upload All Saved Decks
+                    </button>
                   </div>
-                ))
+                  {savedDecks.map((deck, index) => (
+                    <div key={index} style={{ 
+                      display: 'flex', 
+                      justifyContent: 'space-between', 
+                      alignItems: 'center',
+                      padding: '8px',
+                      borderBottom: index < savedDecks.length - 1 ? '1px solid #eee' : 'none'
+                    }}>
+                      <div>
+                        <strong>{deck.name}</strong> ({deck.cards.length} cards)
+                      </div>
+                      <div>
+                        <button 
+                          className="btn"
+                          onClick={() => {
+                            setDeckCreationStatus(`Loading deck "${deck.name}"...`);
+                            createDeck(deck.name, deck.cards).then(success => {
+                              if (success) {
+                                setShowSavedDecks(false);
+                                setDeckCreationStatus(`Deck "${deck.name}" loaded successfully`);
+                                setTimeout(() => refreshDecksList(true), 1000);
+                                setTimeout(() => refreshDecksList(true), 3000);
+                              }
+                            });
+                          }}
+                          style={{ 
+                            marginRight: '5px', 
+                            padding: '5px 10px',
+                            backgroundColor: '#000',
+                            color: '#fff'
+                          }}
+                        >
+                          Load
+                        </button>
+                        <button 
+                          className="btn"
+                          onClick={() => {
+                            try {
+                              const updatedDecks = savedDecks.filter((_, i) => i !== index);
+                              setSavedDecks(updatedDecks);
+                              localStorage.setItem('savedDecks', JSON.stringify(updatedDecks));
+                              setDeckCreationStatus('Saved deck removed');
+                              setTimeout(() => setDeckCreationStatus(''), 2000);
+                            } catch (err) {
+                              console.error(`[${APP_VERSION}] Error removing saved deck:`, err);
+                            }
+                          }}
+                          style={{ padding: '5px 10px' }}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </>
               )}
             </div>
           )}
@@ -1854,7 +2053,8 @@ function PlayerView({ pin, playerName, setView }) {
                 setCurrentCard(players[0].current_card);
                 setDebugInfo(prev => ({ 
                   ...prev, 
-                  lastCardReceived: players[0].current_card || 'none'
+                  lastAction: `Card poll update: ${players[0].current_card || 'no card'}`,
+                  lastCardReceived: players[0].current_card
                 }));
                 setLastCardUpdate(Date.now());
                 
