@@ -1,5 +1,5 @@
 // App Version for tracking
-const APP_VERSION = "1.15.0";
+const APP_VERSION = "1.16.0";
 
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
@@ -653,7 +653,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 
   // Monitor isPlaying and automatically distribute cards once when play starts
   useEffect(() => {
-    if (isPlaying && players.length > 0 && currentDeck) {
+    if (isPlaying && players.length > 0 && currentDeck && !isEnding) {
       // Only distribute if we haven't recently or if the last distribution was for a different deck
       const shouldDistribute = !lastCardDistribution || 
                               (Date.now() - lastCardDistribution.timestamp > 5000) || 
@@ -670,7 +670,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
 
   // Card distribution function
   const distributeCards = async () => {
-    if (!currentDeck || players.length === 0 || !isPlaying) {
+    if (!currentDeck || players.length === 0 || !isPlaying || isEnding) {
       setCardDistributionStatus('Cannot distribute cards: missing deck, players, or not in play mode');
       return;
     }
@@ -693,7 +693,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
         deckId: currentDeck
       });
 
-      setCardDistributionStatus(`Distributing cards from "${selectedDeck.name}" to ${players.length} players...`);
+      setCardDistributionStatus(`Distributing cards from "${selectedDeck.name}" to ${players.length} players in ${mode} mode...`);
 
       // PRE-SELECT THE CARD FOR UNISON MODE BEFORE THE PLAYER LOOP
       let unisonCard = null;
@@ -2042,6 +2042,7 @@ function PlayerView({ pin, playerName, setView }) {
   const [lastCardUpdate, setLastCardUpdate] = useState(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [cardVisibilityChecks, setCardVisibilityChecks] = useState(0);
+  const [lastKnownCard, setLastKnownCard] = useState(null); 
   const initialSetupDone = useRef(false);
   const pollIntervalRef = useRef(null);
   const timerRef = useRef(null);
@@ -2050,8 +2051,9 @@ function PlayerView({ pin, playerName, setView }) {
   const lastCardContent = useRef(null);
   const forceUpdateInterval = useRef(null);
   const syncFailures = useRef(0);
+  const cardUpdateCountRef = useRef(0); 
 
-  // Setup player and initial data
+  // Setup player and initial data - ENHANCED for better card visibility
   useEffect(() => {
     if (initialSetupDone.current) return;
     
@@ -2060,6 +2062,9 @@ function PlayerView({ pin, playerName, setView }) {
         setLoading(true);
         setConnectionStatus('connecting');
         reportStatus('PlayerView', 'Setup initiated', { pin, name: playerName });
+
+        // Log direct debugging info 
+        console.log(`[${APP_VERSION}] Player setup - PIN: ${pin}, Name: ${playerName}`);
 
         const sessions = await safeRoomOperation(
           () => room.collection('session').filter({ pin }).getList(),
@@ -2074,6 +2079,7 @@ function PlayerView({ pin, playerName, setView }) {
           return;
         }
 
+        console.log(`[${APP_VERSION}] Found session with PIN: ${pin}`);
         setConnectionStatus('checking player');
         
         for (let findAttempt = 0; findAttempt < 3; findAttempt++) {
@@ -2092,27 +2098,34 @@ function PlayerView({ pin, playerName, setView }) {
             });
             
             if (players && players.length > 0) {
-              setPlayerId(players[0].id);
+              const foundPlayer = players[0];
+              setPlayerId(foundPlayer.id);
               setDebugInfo(prev => ({ 
                 ...prev, 
                 playerFound: true,
-                playerId: players[0].id
+                playerId: foundPlayer.id
               }));
               
+              console.log(`[${APP_VERSION}] Found existing player: ${foundPlayer.name}, ID: ${foundPlayer.id}`);
+              console.log(`[${APP_VERSION}] Player card state: "${foundPlayer.current_card || 'NO CARD'}"`);
+              
               // Immediately set current card if player has one
-              if (players[0].current_card) {
-                console.log(`[${APP_VERSION}] Initial card received: "${players[0].current_card}"`);
-                setCurrentCard(players[0].current_card);
-                lastCardContent.current = players[0].current_card;
+              if (foundPlayer.current_card) {
+                console.log(`[${APP_VERSION}] Initial card received: "${foundPlayer.current_card}"`);
+                setCurrentCard(foundPlayer.current_card);
+                setLastKnownCard(foundPlayer.current_card);
+                lastCardContent.current = foundPlayer.current_card;
+                cardUpdateCountRef.current++;
+                
                 setDebugInfo(prev => ({ 
                   ...prev, 
-                  lastAction: `Card poll update: ${players[0].current_card || 'no card'}`,
-                  lastCardReceived: players[0].current_card
+                  lastAction: `Card poll update: ${foundPlayer.current_card || 'no card'}`,
+                  lastCardReceived: foundPlayer.current_card
                 }));
                 setLastCardUpdate(Date.now());
                 
-                if (players[0].expires_at) {
-                  const expiry = new Date(players[0].expires_at).getTime();
+                if (foundPlayer.expires_at) {
+                  const expiry = new Date(foundPlayer.expires_at).getTime();
                   const now = Date.now();
                   const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
                   setTimeLeft(remaining);
@@ -2132,7 +2145,7 @@ function PlayerView({ pin, playerName, setView }) {
                 }
               }
               
-              reportStatus('PlayerView', 'Found existing player', { id: players[0].id });
+              reportStatus('PlayerView', 'Found existing player', { id: foundPlayer.id });
               break;
             }
             
@@ -2155,6 +2168,7 @@ function PlayerView({ pin, playerName, setView }) {
                 
                 reportStatus('PlayerView', 'Created new player', { id: newPlayer.id });
                 setPlayerId(newPlayer.id);
+                console.log(`[${APP_VERSION}] Created new player with ID: ${newPlayer.id}`);
                 setDebugInfo(prev => ({ 
                   ...prev, 
                   playerFound: true,
@@ -2189,7 +2203,7 @@ function PlayerView({ pin, playerName, setView }) {
         initialSetupDone.current = true;
         reportStatus('PlayerView', 'Player setup complete', { id: playerId });
 
-        // NEW: More frequent and more aggressive polling for better reliability
+        // More frequent polling for cards with detailed logging
         pollIntervalRef.current = setInterval(async () => {
           try {
             const polledPlayers = await room.collection('player')
@@ -2203,6 +2217,8 @@ function PlayerView({ pin, playerName, setView }) {
               if (player.current_card !== currentCard) {
                 console.log(`[${APP_VERSION}] Poll received updated card: "${player.current_card}" (was: "${currentCard}")`);
                 lastCardContent.current = player.current_card;
+                setLastKnownCard(player.current_card);
+                cardUpdateCountRef.current++;
               }
               
               // Always update the card if one exists
@@ -2246,14 +2262,20 @@ function PlayerView({ pin, playerName, setView }) {
           } catch (pollErr) {
             // Silent fail for polling - it's just a backup
           }
-        }, 1000); // Even more frequent polling (every 1 second)
+        }, 1000); 
 
-        // NEW: Check card visibility periodically
+        // Check card visibility periodically and forcibly restore card if needed
         cardCheckIntervalRef.current = setInterval(() => {
           // Check if we should have a card visible
+          if (lastKnownCard && lastKnownCard !== 'END' && !currentCard) {
+            console.log(`[${APP_VERSION}] CRITICAL: Card should be visible but isn't! Restoring: "${lastKnownCard}"`);
+            setCurrentCard(lastKnownCard);
+            lastCardContent.current = lastKnownCard;
+          }
+          
           if (currentCard && currentCard !== 'END' && timeLeft > 0) {
             setCardVisibilityChecks(prev => prev + 1);
-            console.log(`[${APP_VERSION}] Card visibility check #${cardVisibilityChecks+1}: Card "${currentCard}" is active with ${timeLeft}s remaining`);
+            console.log(`[${APP_VERSION}] Card visibility check #${cardVisibilityChecks+1}: Card "${currentCard}" is active with ${timeLeft}s remaining. Updates: ${cardUpdateCountRef.current}`);
           }
         }, 3000);
 
@@ -2273,7 +2295,9 @@ function PlayerView({ pin, playerName, setView }) {
                 if (player.current_card !== currentCard) {
                   console.log(`[${APP_VERSION}] Force sync: Card mismatch detected. Server: "${player.current_card}", Local: "${currentCard}"`);
                   setCurrentCard(player.current_card);
+                  setLastKnownCard(player.current_card);
                   lastCardContent.current = player.current_card;
+                  cardUpdateCountRef.current++;
                   syncFailures.current = 0;
                 } else {
                   // Cards match, reset failure counter
@@ -2300,7 +2324,7 @@ function PlayerView({ pin, playerName, setView }) {
                 if (syncFailures.current >= 3) {
                   console.warn(`[${APP_VERSION}] Force sync: Multiple failures, attempting recovery`);
                   syncFailures.current = 0;
-                  setRetries(prev => prev + 1); // Trigger reconnection logic
+                  setRetries(prev => prev + 1); 
                 }
               }
             }
@@ -2309,7 +2333,7 @@ function PlayerView({ pin, playerName, setView }) {
           }
         }, 10000);
 
-        // Set up subscription for real-time updates
+        // Set up subscription for real-time updates with improved error handling
         const setupPlayerSubscription = () => {
           let retryAttempt = 0;
           const maxRetries = 10;
@@ -2330,6 +2354,8 @@ function PlayerView({ pin, playerName, setView }) {
                     if (player.current_card !== currentCard) {
                       console.log(`[${APP_VERSION}] Subscription received updated card: "${player.current_card}" (was: "${currentCard}")`);
                       lastCardContent.current = player.current_card;
+                      setLastKnownCard(player.current_card);
+                      cardUpdateCountRef.current++;
                     }
                     
                     setCurrentCard(player.current_card);
@@ -2456,6 +2482,7 @@ function PlayerView({ pin, playerName, setView }) {
                 if (players && players.length > 0) {
                   const updatedPlayer = players[0];
                   setCurrentCard(updatedPlayer.current_card);
+                  setLastKnownCard(updatedPlayer.current_card);
                   lastCardContent.current = updatedPlayer.current_card;
                   setLastCardUpdate(Date.now());
                   
@@ -2474,9 +2501,9 @@ function PlayerView({ pin, playerName, setView }) {
             }, 500);
           }
           
-          return parseFloat(newTime.toFixed(1)); // Keep one decimal place for smoother appearance
+          return parseFloat(newTime.toFixed(1)); 
         });
-      }, 100); // Update 10 times per second for smooth visuals
+      }, 100); 
 
       return () => {
         if (timerRef.current) {
@@ -2503,7 +2530,7 @@ function PlayerView({ pin, playerName, setView }) {
         setReconnectAttempts(prev => prev + 1);
         
         // Reset our subscription by forcing a retry
-        setRetries(prev => prev + 1);
+        setRetries(prev => prev + 1); 
         
         // Also directly poll for latest card
         room.collection('player')
@@ -2513,6 +2540,7 @@ function PlayerView({ pin, playerName, setView }) {
             if (players && players.length > 0) {
               const player = players[0];
               setCurrentCard(player.current_card);
+              setLastKnownCard(player.current_card);
               lastCardContent.current = player.current_card;
               setLastCardUpdate(Date.now());
               
@@ -2536,11 +2564,19 @@ function PlayerView({ pin, playerName, setView }) {
     };
   }, [isSessionActive, lastCardUpdate, reconnectAttempts, pin, playerName]);
 
+  // Force card display using last known card content if needed 
+  useEffect(() => {
+    if (!currentCard && lastKnownCard && lastKnownCard !== 'END') {
+      console.log(`[${APP_VERSION}] VISIBILITY FIX: Restoring last known card: "${lastKnownCard}"`);
+      setCurrentCard(lastKnownCard);
+    }
+  }, [currentCard, lastKnownCard]);
+
   const getProgressWidth = () => {
     if (timeLeft <= 0 || totalTime <= 0) return 0;
     // Smooth calculation with better precision
     const percentage = ((totalTime - timeLeft) / totalTime) * 100;
-    return Math.min(100, Math.max(0, percentage)); // Ensure value is between 0-100%
+    return Math.min(100, Math.max(0, percentage)); 
   };
 
   // Force card display using last known card content if needed
@@ -2619,6 +2655,9 @@ function PlayerView({ pin, playerName, setView }) {
     );
   }
 
+  // ENHANCED Card display rendering with alerts for debugging
+  console.log(`[${APP_VERSION}] Rendering card: "${currentCard || 'NO CARD'}"`);
+
   return (
     <div style={{ height: '100vh', position: 'relative' }}>
       {currentCard ? (
@@ -2642,7 +2681,7 @@ function PlayerView({ pin, playerName, setView }) {
                 className="timer-progress"
                 style={{ 
                   width: `${getProgressWidth()}%`,
-                  transition: 'width 0.1s linear', // Smoother transition
+                  transition: 'width 0.1s linear', 
                   backgroundColor: timeLeft < 10 ? '#ff3b30' : '#000'
                 }}
               ></div>
@@ -2650,7 +2689,7 @@ function PlayerView({ pin, playerName, setView }) {
             
             {/* Hidden debug link that shows more info when double-clicked */}
             <div 
-              onDoubleClick={() => alert(`Debug: Card="${currentCard}", Time=${timeLeft}s, Total=${totalTime}s, Last received=${debugInfo.lastCardReceived}, PlayerId=${debugInfo.playerId || 'unknown'}, Status=${connectionStatus}`)}
+              onDoubleClick={() => alert(`Debug: Card="${currentCard}", Time=${timeLeft}s, Total=${totalTime}s, Last received=${debugInfo.lastCardReceived}, PlayerId=${debugInfo.playerId || 'unknown'}, Status=${connectionStatus}, Updates=${cardUpdateCountRef.current}`)}
               style={{ fontSize: '10px', color: '#fff', position: 'absolute', bottom: '5px', right: '5px', cursor: 'default' }}
             >
               v{APP_VERSION}
