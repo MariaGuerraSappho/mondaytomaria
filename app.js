@@ -1,5 +1,5 @@
 // App Version for tracking
-const APP_VERSION = "1.17.0";
+const APP_VERSION = "1.18.0";
 
 const { useState, useEffect, useRef, useMemo } = React;
 const { createRoot } = ReactDOM;
@@ -397,6 +397,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       if (deckRefIntervalRef.current) {
         clearInterval(deckRefIntervalRef.current);
       }
+      
     };
   }, []);
 
@@ -578,7 +579,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
           
           return () => {};
         }
-      };
+        };
       
       const unsubscribe = subscribeWithRetry();
       
@@ -1071,7 +1072,10 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   const getPlayerProgress = (player) => {
     if (!player.expires_at) return 0;
     
-    const expiry = new Date(player.expires_at).getTime();
+    const timestamp = playerDataRef.current?.expires_at;
+    if (!timestamp) return 0;
+    
+    const expiry = new Date(timestamp).getTime();
     const now = Date.now();
     const totalDuration = player.total_duration_ms || ((maxTime + minTime) / 2 * 1000);
     const elapsed = totalDuration - Math.max(0, expiry - now);
@@ -1175,7 +1179,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
     }
   };
 
-  // Define the missing createDeck function
+  // Define the createDeck function to create decks reliably
   const createDeck = async (name, cardsInput) => {
     if (!pin) {
       setError('Session PIN not available. Please refresh the page.');
@@ -1382,68 +1386,29 @@ function ConductorView({ setView, sessionData, setSessionData }) {
       </div>
 
       <div className="card">
-        <h2 className="header">Deck Management</h2>
-        
-        <div className="mb-4">
-          <h3>Create a New Deck</h3>
-          <input
-            type="text"
-            className="input"
-            placeholder="Deck Name (required)"
-            value={deckName}
-            onChange={(e) => setDeckName(e.target.value)}
-            disabled={loading}
-          />
-          <textarea
-            className="input"
-            rows="5"
-            placeholder="Enter cards, one per line:&#10;Card 1&#10;Card 2&#10;Card 3"
-            value={textInput}
-            onChange={(e) => setTextInput(e.target.value)}
-            disabled={loading}
-          ></textarea>
-          <button 
-            className={`btn btn-primary ${loading ? 'btn-disabled' : ''}`} 
-            onClick={handleTextSubmit}
-            disabled={loading}
-          >
-            {loading ? 'Creating...' : 'Add Deck'}
-          </button>
-          {deckCreationStatus && (
-            <div className="helper-text" style={{ marginTop: '10px', fontWeight: 'bold' }}>
-              {deckCreationStatus}
-            </div>
-          )}
-        </div>
-        
-        <div className="mb-4">
-          <h3>Or Upload JSON File</h3>
-          <input
-            type="file"
-            accept=".json"
-            onChange={handleFileUpload}
-            value={fileInput}
-            disabled={loading}
-          />
-          <p className="helper-text">
-            Accepts: JSON array of strings, or objects with name/cards properties
-          </p>
-        </div>
-        
-        {loading && (
-          <div style={{ marginTop: '10px', width: '100%', height: '8px', backgroundColor: '#eee', borderRadius: '4px' }}>
-            <div 
-              style={{ 
-                width: '50%', 
-                height: '100%', 
-                backgroundColor: '#000', 
-                borderRadius: '4px',
-                animation: 'progress-bar 1.5s infinite'
-              }}
-            ></div>
-          </div>
-        )}
-        
+        <input
+          type="text"
+          className="input"
+          placeholder="Deck Name (required)"
+          value={deckName}
+          onChange={(e) => setDeckName(e.target.value)}
+          disabled={loading}
+        />
+        <textarea
+          className="input"
+          rows="5"
+          placeholder="Enter cards, one per line:&#10;Card 1&#10;Card 2&#10;Card 3"
+          value={textInput}
+          onChange={(e) => setTextInput(e.target.value)}
+          disabled={loading}
+        ></textarea>
+        <button 
+          className={`btn btn-primary ${loading ? 'btn-disabled' : ''}`} 
+          onClick={handleTextSubmit}
+          disabled={loading}
+        >
+          {loading ? 'Creating...' : 'Add Deck'}
+        </button>
         {error && (
           <div style={{ color: 'red', marginBottom: '15px', padding: '10px', backgroundColor: '#ffeeee', borderRadius: '8px' }}>
             <strong>Error:</strong> {error}
@@ -1463,277 +1428,11 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             </div>
           </div>
         )}
-        
-        <div className="mb-4">
-          <button 
-            className="btn"
-            onClick={() => setShowSavedDecks(!showSavedDecks)}
-            style={{ marginBottom: '10px' }}
-          >
-            {showSavedDecks ? 'Hide Saved Decks' : `Show Saved Decks (${savedDecks.length})`}
-          </button>
-          
-          {showSavedDecks && (
-            <div style={{ maxHeight: '200px', overflowY: 'auto', border: '1px solid #ddd', borderRadius: '8px', padding: '10px' }}>
-              {savedDecks.length === 0 ? (
-                <p>No saved decks yet. Save decks to reuse them later.</p>
-              ) : (
-                <>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
-                    <strong>{savedDecks.length} Saved Deck{savedDecks.length !== 1 ? 's' : ''}</strong>
-                    <button 
-                      className="btn btn-small"
-                      onClick={uploadAllSavedDecks}
-                      disabled={loading}
-                      style={{ 
-                        padding: '5px 10px',
-                        backgroundColor: '#000',
-                        color: '#fff'
-                      }}
-                    >
-                      Upload All Saved Decks
-                    </button>
-                  </div>
-                  {savedDecks.map((deck, index) => (
-                    <div key={index} style={{ 
-                      display: 'flex', 
-                      justifyContent: 'space-between', 
-                      alignItems: 'center',
-                      padding: '8px',
-                      borderBottom: index < savedDecks.length - 1 ? '1px solid #eee' : 'none'
-                    }}>
-                      <div>
-                        <strong>{deck.name}</strong> ({deck.cards.length} cards)
-                      </div>
-                      <div>
-                        <button 
-                          className="btn"
-                          onClick={() => {
-                            setDeckCreationStatus(`Loading deck "${deck.name}"...`);
-                            createDeck(deck.name, deck.cards).then(success => {
-                              if (success) {
-                                setShowSavedDecks(false);
-                                setDeckCreationStatus(`Deck "${deck.name}" loaded successfully`);
-                                setTimeout(() => refreshDecksList(true), 1000);
-                                setTimeout(() => refreshDecksList(true), 3000);
-                              }
-                            });
-                          }}
-                          style={{ 
-                            marginRight: '5px', 
-                            padding: '5px 10px',
-                            backgroundColor: '#000',
-                            color: '#fff'
-                          }}
-                        >
-                          Load
-                        </button>
-                        <button 
-                          className="btn"
-                          onClick={() => {
-                            try {
-                              const updatedDecks = savedDecks.filter((_, i) => i !== index);
-                              setSavedDecks(updatedDecks);
-                              localStorage.setItem('savedDecks', JSON.stringify(updatedDecks));
-                              setDeckCreationStatus('Saved deck removed');
-                              setTimeout(() => setDeckCreationStatus(''), 2000);
-                            } catch (err) {
-                              console.error(`[${APP_VERSION}] Error removing saved deck:`, err);
-                            }
-                          }}
-                          style={{ padding: '5px 10px' }}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </>
-              )}
-            </div>
-          )}
-        </div>
-        
-        <div>
-          <h3>Available Decks for This Session ({displayDecks.length})</h3>
-          <div style={{ display: 'flex', gap: '10px', marginBottom: '15px', flexWrap: 'wrap' }}>
-            <button 
-              className="btn" 
-              onClick={() => refreshDecksList(true)}
-              disabled={loading}
-              style={{ backgroundColor: '#000', color: '#fff' }}
-            >
-              <span style={{ marginRight: '5px' }}>↻</span> Refresh Decks
-            </button>
-            
-            <button 
-              className={`btn ${displayDecks.length === 0 ? 'btn-disabled' : ''}`}
-              onClick={() => {
-                try {
-                  if (displayDecks.length === 0) {
-                    setError('No decks to download');
-                    return;
-                  }
-                  
-                  const exportData = {
-                    app_version: APP_VERSION,
-                    exported_at: new Date().toISOString(),
-                    decks: displayDecks.map(deck => ({
-                      name: deck.name,
-                      cards: deck.cards || []
-                    }))
-                  };
-                  
-                  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-                  const url = URL.createObjectURL(blob);
-                  
-                  const a = document.createElement('a');
-                  a.href = url;
-                  a.download = `improv_decks_${new Date().toISOString().slice(0,10)}.json`;
-                  document.body.appendChild(a);
-                  a.click();
-                  
-                  setTimeout(() => {
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                  }, 100);
-                  
-                  setDeckCreationStatus(`Downloaded ${displayDecks.length} deck${displayDecks.length !== 1 ? 's' : ''}`);
-                  setTimeout(() => setDeckCreationStatus(''), 3000);
-                } catch (err) {
-                  console.error(`[${APP_VERSION}] Download error:`, err);
-                  setError(`Download failed: ${err.message || 'Unknown error'}`);
-                }
-              }}
-              disabled={displayDecks.length === 0 || loading}
-            >
-              Download All Decks
-            </button>
+        {deckCreationStatus && (
+          <div className="helper-text" style={{ marginTop: '10px', fontWeight: 'bold' }}>
+            {deckCreationStatus}
           </div>
-          
-          {displayDecks.length === 0 ? (
-            <div style={{ padding: '15px', backgroundColor: '#f8f8f8', borderRadius: '8px', marginBottom: '15px' }}>
-              <p>No decks available for this session yet</p>
-              <p style={{ fontSize: '14px', marginTop: '5px' }}>
-                Create a deck above or upload a JSON file
-              </p>
-            </div>
-          ) : (
-            <div style={{ marginBottom: '15px' }}>
-              <div style={{ 
-                maxHeight: '250px', 
-                overflowY: 'auto', 
-                border: '1px solid #ddd', 
-                borderRadius: '8px' 
-              }}>
-                {displayDecks.map((deck, index) => (
-                  <div key={deck.id || deck._opId} style={{ 
-                    padding: '10px',
-                    backgroundColor: currentDeck === deck.id ? '#f0f0f0' : 
-                                    deck._isOptimistic ? '#fffde7' : 'transparent',
-                    borderBottom: index < displayDecks.length - 1 ? '1px solid #eee' : 'none',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    opacity: deck._isOptimistic ? 0.8 : 1
-                  }}>
-                    <div>
-                      <strong 
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => {
-                          if (!deck._isOptimistic) {
-                            setCurrentDeck(deck.id);
-                            setCurrentDeckName(deck.name);
-                          }
-                        }}
-                      >
-                        {deck.name}
-                        {deck._isOptimistic && processingQueue.includes(deck._opId) && ' (Processing...)'}
-                        {deck._isOptimistic && deck._error && ' (Error - Try Again)'}
-                      </strong>
-                      <div style={{ fontSize: '14px', color: '#666' }}>
-                        {deck.cards?.length || 0} cards
-                        {deck._isOptimistic && <span> - local only</span>}
-                      </div>
-                    </div>
-                    <div>
-                      {!deck._isOptimistic && (
-                        <>
-                          <button 
-                            className="btn"
-                            onClick={() => {
-                              setCurrentDeck(deck.id);
-                              setCurrentDeckName(deck.name);
-                            }}
-                            style={{ 
-                              marginRight: '5px', 
-                              padding: '5px 10px',
-                              backgroundColor: currentDeck === deck.id ? '#000' : '#fff',
-                              color: currentDeck === deck.id ? '#fff' : '#000'
-                            }}
-                          >
-                            Select
-                          </button>
-                          <button 
-                            className="btn"
-                            onClick={() => {
-                              try {
-                                const exists = savedDecks.some(saved => 
-                                  saved.name === deck.name && 
-                                  JSON.stringify(saved.cards) === JSON.stringify(deck.cards)
-                                );
-                                
-                                if (exists) {
-                                  setDeckCreationStatus(`Deck "${deck.name}" is already saved`);
-                                  return;
-                                }
-                                
-                                const deckToSave = {
-                                  name: deck.name,
-                                  cards: deck.cards,
-                                  saved_at: new Date().toISOString()
-                                };
-                                
-                                const updatedSavedDecks = [...savedDecks, deckToSave];
-                                setSavedDecks(updatedSavedDecks);
-                                
-                                localStorage.setItem('savedDecks', JSON.stringify(updatedSavedDecks));
-                                
-                                setDeckCreationStatus(`Deck "${deck.name}" saved for future use`);
-                                setTimeout(() => setDeckCreationStatus(''), 3000);
-                              } catch (err) {
-                                console.error(`[${APP_VERSION}] Error saving deck:`, err);
-                                setDeckCreationStatus(`Could not save deck: ${err.message || 'Unknown error'}`);
-                              }
-                            }}
-                            style={{ padding: '5px 10px' }}
-                          >
-                            Save
-                          </button>
-                        </>
-                      )}
-                      {deck._isOptimistic && deck._error && (
-                        <button 
-                          className="btn"
-                          onClick={() => setOptimisticDecks(prev => 
-                            prev.filter(d => d._opId !== deck._opId)
-                          )}
-                          style={{ 
-                            padding: '5px 10px',
-                            backgroundColor: '#fff',
-                            color: '#000'
-                          }}
-                        >
-                          Dismiss
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+        )}
       </div>
 
       <div className="card">
@@ -1825,7 +1524,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
             </button>
           ) : (
             <button 
-              className={`btn btn-primary ${(!currentDeck || players.length === 0) ? 'btn-disabled' : ''}`}
+              className={`btn btn-small ${(!currentDeck || players.length === 0) ? 'btn-disabled' : ''}`}
               onClick={() => setIsPlaying(true)}
               disabled={!currentDeck || players.length === 0}
               style={{ marginRight: '10px' }}
@@ -2027,7 +1726,7 @@ function ConductorView({ setView, sessionData, setSessionData }) {
   );
 }
 
-// Enhanced Player View with better countdown visualization
+// Completely redesigned PlayerView with multiple failsafes to ensure card visibility
 function PlayerView({ pin, playerName, setView }) {
   const [currentCard, setCurrentCard] = useState(null);
   const [timeLeft, setTimeLeft] = useState(0);
@@ -2044,7 +1743,9 @@ function PlayerView({ pin, playerName, setView }) {
   const [cardVisibilityChecks, setCardVisibilityChecks] = useState(0);
   const [lastKnownCard, setLastKnownCard] = useState(null); 
   const [forcedRefreshCount, setForcedRefreshCount] = useState(0);
+  const [emergencyModeActive, setEmergencyModeActive] = useState(false);
   const initialSetupDone = useRef(false);
+  const playerDataRef = useRef(null); // Store player data here for direct access
   const pollIntervalRef = useRef(null);
   const timerRef = useRef(null);
   const lastTimeRef = useRef(0);
@@ -2054,135 +1755,245 @@ function PlayerView({ pin, playerName, setView }) {
   const syncFailures = useRef(0);
   const cardUpdateCountRef = useRef(0); 
   const directRenderBypassRef = useRef(null);
+  const lastExpiryTime = useRef(null);
+  const directDisplayCountdownIntervalRef = useRef(null);
+  const lastCardSyncTimestamp = useRef(Date.now());
+  const lastCardDistributed = useRef(null);
 
-  // NEW: Direct render bypass - emergency fix for card visibility
+  // Create a more reliable and direct display element for critical card display
   useEffect(() => {
-    // Create a direct bypass mechanism that renders the card regardless of React state
-    const createDirectBypass = () => {
-      // Only create if it doesn't exist
-      if (!directRenderBypassRef.current) {
-        const bypassElement = document.createElement('div');
-        bypassElement.id = 'emergency-card-display';
-        bypassElement.style.position = 'fixed';
-        bypassElement.style.top = '0';
-        bypassElement.style.left = '0';
-        bypassElement.style.width = '100%';
-        bypassElement.style.height = '100%';
-        bypassElement.style.backgroundColor = 'white';
-        bypassElement.style.zIndex = '10000';
-        bypassElement.style.display = 'none';
-        bypassElement.style.flexDirection = 'column';
-        bypassElement.style.justifyContent = 'center';
-        bypassElement.style.alignItems = 'center';
-        bypassElement.style.padding = '20px';
-        bypassElement.style.textAlign = 'center';
-        bypassElement.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+    const createDirectDisplay = () => {
+      // Add direct emergency display container if it doesn't exist
+      if (!document.getElementById('direct-display-container')) {
+        console.log(`[${APP_VERSION}] Creating direct display container`);
         
-        document.body.appendChild(bypassElement);
-        directRenderBypassRef.current = bypassElement;
-        console.log(`[${APP_VERSION}] Created emergency card display bypass element`);
+        const container = document.createElement('div');
+        container.id = 'direct-display-container';
+        container.style.position = 'fixed';
+        container.style.top = '0';
+        container.style.left = '0';
+        container.style.width = '100%';
+        container.style.height = '100%';
+        container.style.backgroundColor = 'white';
+        container.style.zIndex = '10000';
+        container.style.display = 'none';
+        container.style.flexDirection = 'column';
+        container.style.justifyContent = 'center';
+        container.style.alignItems = 'center';
+        container.style.padding = '20px';
+        container.style.textAlign = 'center';
+        container.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+        
+        document.body.appendChild(container);
+        directRenderBypassRef.current = container;
       }
     };
     
-    createDirectBypass();
+    createDirectDisplay();
     
     return () => {
-      // Clean up the bypass element on unmount
       if (directRenderBypassRef.current) {
         directRenderBypassRef.current.remove();
         directRenderBypassRef.current = null;
       }
-    };
-  }, []);
-  
-  // CRITICAL: Display card with direct DOM manipulation if React fails
-  useEffect(() => {
-    const updateEmergencyDisplay = () => {
-      if (directRenderBypassRef.current) {
-        const bypassElement = directRenderBypassRef.current;
-        
-        if (currentCard && currentCard !== 'END' && timeLeft > 0) {
-          // Only show emergency display if the regular React view isn't showing the card
-          const reactCardElement = document.querySelector('.card-text');
-          
-          if (!reactCardElement || reactCardElement.innerText !== currentCard) {
-            console.log(`[${APP_VERSION}] EMERGENCY: Activating direct card display for "${currentCard}"`);
-            
-            bypassElement.innerHTML = `
-              <div style="background-color: white; border-radius: 16px; padding: 40px 20px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); width: 90%; max-width: 500px;">
-                <h1 style="font-size: 36px; font-weight: bold; color: black; word-wrap: break-word; text-shadow: 0 0 1px rgba(0,0,0,0.1); padding: 10px; line-height: 1.4;">
-                  ${currentCard}
-                </h1>
-                
-                <div style="margin-top: 30px; text-align: center;">
-                  <span style="font-size: 48px; font-weight: bold; color: ${timeLeft < 10 ? '#ff3b30' : '#000'}">
-                    ${Math.ceil(timeLeft)}
-                  </span>
-                  <span style="font-size: 20px;"> seconds remaining</span>
-                </div>
-                
-                <div style="margin-top: 30px; width: 100%; height: 14px; background-color: #eee; border-radius: 4px; overflow: hidden;">
-                  <div style="width: ${totalTime > 0 ? Math.min(100, Math.max(0, ((totalTime - timeLeft) / totalTime) * 100)) : 0}%; height: 100%; background-color: ${timeLeft < 10 ? '#ff3b30' : '#000'}; border-radius: 4px;"></div>
-                </div>
-                
-                <p style="margin-top: 20px; font-size: 12px; color: #888;">Emergency display mode - v${APP_VERSION}</p>
-              </div>
-            `;
-            
-            bypassElement.style.display = 'flex';
-            
-            // Hide this after 5 seconds if React display recovers
-            setTimeout(() => {
-              const reactCardElement = document.querySelector('.card-text');
-              if (reactCardElement && reactCardElement.innerText === currentCard) {
-                bypassElement.style.display = 'none';
-              }
-            }, 5000);
-          } else {
-            bypassElement.style.display = 'none';
-          }
-        } else if (currentCard === 'END') {
-          bypassElement.innerHTML = `
-            <div style="background-color: white; border-radius: 16px; padding: 40px 20px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); width: 90%; max-width: 500px;">
-              <h1 style="font-size: 36px; font-weight: bold; color: black; word-wrap: break-word; text-shadow: 0 0 1px rgba(0,0,0,0.1); padding: 10px; line-height: 1.4;">
-                SESSION ENDED
-              </h1>
-              <p>Thank you for playing!</p>
-              <button style="margin-top: 20px; padding: 10px 20px; font-size: 16px; font-weight: bold; cursor: pointer; border: 2px solid black; border-radius: 8px; background-color: white;" onclick="window.location.href = window.location.origin + window.location.pathname">
-                Return to Home
-              </button>
-              <p style="margin-top: 10px; font-size: 12px; color: #888;">Emergency display mode - v${APP_VERSION}</p>
-            </div>
-          `;
-          bypassElement.style.display = 'flex';
-        } else {
-          bypassElement.style.display = 'none';
-        }
+      
+      if (directDisplayCountdownIntervalRef.current) {
+        clearInterval(directDisplayCountdownIntervalRef.current);
+        directDisplayCountdownIntervalRef.current = null;
       }
     };
-    
-    // Update the emergency display
-    updateEmergencyDisplay();
-    
-    // Also set up an interval to periodically check if we need to activate it
-    const emergencyInterval = setInterval(updateEmergencyDisplay, 2000);
-    
-    return () => clearInterval(emergencyInterval);
-  }, [currentCard, timeLeft, totalTime]);
+  }, []);
 
-  // Setup player and initial data - ENHANCED for better card visibility
+  // Setup a separate interval to update the direct display independently
+  useEffect(() => {
+    if (directDisplayCountdownIntervalRef.current) {
+      clearInterval(directDisplayCountdownIntervalRef.current);
+    }
+    
+    // Autonomous direct display update interval
+    directDisplayCountdownIntervalRef.current = setInterval(() => {
+      updateDirectDisplay();
+    }, 100);
+    
+    return () => {
+      if (directDisplayCountdownIntervalRef.current) {
+        clearInterval(directDisplayCountdownIntervalRef.current);
+      }
+    };
+  }, []);
+
+  // Autonomous emergency display function that works independently of React
+  const updateDirectDisplay = () => {
+    if (!directRenderBypassRef.current) return;
+    
+    const container = directRenderBypassRef.current;
+    const reactCardElement = document.querySelector('.card-text');
+    const reactTimer = document.querySelector('.timer-bar');
+    
+    let cardToDisplay = lastCardContent.current;
+    const playerData = playerDataRef.current;
+    
+    // Calculate time remaining directly if we have expiry time
+    let displayTimeLeft = 0;
+    let displayTotalTime = 0;
+    let showEmergencyDisplay = false;
+    
+    if (lastExpiryTime.current) {
+      const expiry = new Date(lastExpiryTime.current).getTime();
+      const now = Date.now();
+      displayTimeLeft = Math.max(0, (expiry - now) / 1000);
+    }
+    
+    // Safety check - if React display is not showing our card, activate emergency display
+    if (cardToDisplay && cardToDisplay !== 'END' && displayTimeLeft > 0) {
+      // Check if React display is working correctly
+      const reactDisplayWorking = reactCardElement && 
+                                 reactCardElement.textContent === cardToDisplay &&
+                                 reactTimer;
+      
+      // Show emergency display if React failed or if we're in emergency mode
+      showEmergencyDisplay = !reactDisplayWorking || emergencyModeActive;
+      
+      if (showEmergencyDisplay) {
+        // If emergency mode not already active, set it
+        if (!emergencyModeActive) {
+          console.log(`[${APP_VERSION}] EMERGENCY MODE ACTIVATED: React display not functioning correctly for card "${cardToDisplay}"`);
+          setEmergencyModeActive(true);
+        }
+        
+        // Calculate progress
+        if (playerData && playerData.total_duration_ms) {
+          displayTotalTime = playerData.total_duration_ms / 1000;
+        } else {
+          displayTotalTime = Math.max(30, displayTimeLeft + 5);
+        }
+        
+        const progressPercent = displayTotalTime > 0 ? 
+            Math.min(100, Math.max(0, ((displayTotalTime - displayTimeLeft) / displayTotalTime) * 100)) : 0;
+        
+        // Update the emergency display
+        container.innerHTML = `
+          <div style="background-color: white; border-radius: 16px; padding: 40px 20px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); width: 90%; max-width: 500px;">
+            <h1 style="font-size: 36px; font-weight: bold; color: black; word-wrap: break-word; text-shadow: 0 0 1px rgba(0,0,0,0.1); padding: 10px; line-height: 1.4;">
+              ${cardToDisplay}
+            </h1>
+            
+            <div style="margin-top: 30px; text-align: center;">
+              <span style="font-size: 48px; font-weight: bold; color: ${displayTimeLeft < 10 ? '#ff3b30' : '#000'}">
+                ${Math.ceil(displayTimeLeft)}
+              </span>
+              <span style="font-size: 20px;"> seconds remaining</span>
+            </div>
+            
+            <div style="margin-top: 30px; width: 100%; height: 14px; background-color: #eee; border-radius: 4px; overflow: hidden;">
+              <div style="width: ${progressPercent}%; height: 100%; background-color: ${displayTimeLeft < 10 ? '#ff3b30' : '#000'}; border-radius: 4px;"></div>
+            </div>
+            
+            <p style="margin-top: 20px; font-size: 12px; color: #888;">Direct display mode - v${APP_VERSION}</p>
+          </div>
+        `;
+        
+        container.style.display = 'flex';
+      } else {
+        // React display is working, hide emergency display
+        container.style.display = 'none';
+        if (emergencyModeActive) {
+          console.log(`[${APP_VERSION}] Emergency mode deactivated: React display functioning correctly`);
+          setEmergencyModeActive(false);
+        }
+      }
+    } else if (cardToDisplay === 'END') {
+      // Session ended message
+      container.innerHTML = `
+        <div style="background-color: white; border-radius: 16px; padding: 40px 20px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); width: 90%; max-width: 500px;">
+          <h1 style="font-size: 36px; font-weight: bold; color: black; word-wrap: break-word; text-shadow: 0 0 1px rgba(0,0,0,0.1); padding: 10px; line-height: 1.4;">
+            SESSION ENDED
+          </h1>
+          <p>Thank you for playing!</p>
+          <button style="margin-top: 20px; padding: 10px 20px; font-size: 16px; font-weight: bold; cursor: pointer; border: 2px solid black; border-radius: 8px; background-color: white;" onclick="window.location.href = window.location.origin + window.location.pathname">
+            Return to Home
+          </button>
+          <p style="margin-top: 10px; font-size: 12px; color: #888;">Direct display mode - v${APP_VERSION}</p>
+        </div>
+      `;
+      container.style.display = 'flex';
+    } else {
+      // No active card or time expired, hide emergency display
+      container.style.display = 'none';
+    }
+  };
+
+  // Ultra-reliable player data processing function
+  const processPlayerData = (player) => {
+    if (!player) return false;
+    
+    try {
+      // Store the full player data for direct access
+      playerDataRef.current = player;
+      
+      // Log detailed player data
+      console.log(`[${APP_VERSION}] Player data received:`, {
+        name: player.name,
+        card: player.current_card,
+        deck: player.deck_name,
+        expiresAt: player.expires_at,
+        totalDuration: player.total_duration_ms
+      });
+      
+      // Record this card distribution
+      if (player.current_card && player.current_card !== lastCardDistributed.current) {
+        lastCardDistributed.current = player.current_card;
+        lastCardSyncTimestamp.current = Date.now();
+        console.log(`[${APP_VERSION}] NEW CARD DISTRIBUTED: "${player.current_card}"`);
+      }
+      
+      // Always update the card if it exists
+      if (player.current_card) {
+        console.log(`[${APP_VERSION}] Setting card to: "${player.current_card}"`);
+        setCurrentCard(player.current_card);
+        setLastKnownCard(player.current_card);
+        lastCardContent.current = player.current_card;
+        cardUpdateCountRef.current++;
+        setLastCardUpdate(Date.now());
+        
+        if (player.expires_at) {
+          lastExpiryTime.current = player.expires_at;
+          
+          const expiry = new Date(player.expires_at).getTime();
+          const now = Date.now();
+          const remaining = Math.max(0, (expiry - now) / 1000);
+          setTimeLeft(remaining);
+          
+          // Update total time for progress bar calculation
+          if (player.total_duration_ms) {
+            setTotalTime(player.total_duration_ms / 1000);
+          } else if (totalTime <= 0) {
+            setTotalTime(Math.max(30, remaining)); // Fallback estimate
+          }
+        }
+      }
+      
+      return true;
+    } catch (err) {
+      console.error(`[${APP_VERSION}] Error processing player data:`, err);
+      return false;
+    }
+  };
+
+  // Setup player and initial data with multiple fallbacks
   useEffect(() => {
     if (initialSetupDone.current) return;
+    
+    // Mark setup as done immediately to prevent multiple setups
+    initialSetupDone.current = true;
     
     const setupPlayer = async () => {
       try {
         setLoading(true);
         setConnectionStatus('connecting');
-        reportStatus('PlayerView', 'Setup initiated', { pin, name: playerName });
+        console.log(`[${APP_VERSION}] Player setup initiated: PIN=${pin}, Name=${playerName}`);
 
-        // Log direct debugging info 
-        console.log(`[${APP_VERSION}] Player setup - PIN: ${pin}, Name: ${playerName}`);
-
+        // Verify session exists
         const sessions = await safeRoomOperation(
           () => room.collection('session').filter({ pin }).getList(),
           3,
@@ -2196,9 +2007,10 @@ function PlayerView({ pin, playerName, setView }) {
           return;
         }
 
-        console.log(`[${APP_VERSION}] Found session with PIN: ${pin}`);
+        console.log(`[${APP_VERSION}] Connected to session with PIN: ${pin}`);
         setConnectionStatus('checking player');
         
+        // Multi-attempt player search and creation
         for (let findAttempt = 0; findAttempt < 3; findAttempt++) {
           try {
             let players = await safeRoomOperation(
@@ -2210,10 +2022,6 @@ function PlayerView({ pin, playerName, setView }) {
               8000
             );
             
-            reportStatus('PlayerView', `Player search attempt ${findAttempt+1}`, { 
-              found: players?.length > 0
-            });
-            
             if (players && players.length > 0) {
               const foundPlayer = players[0];
               setPlayerId(foundPlayer.id);
@@ -2224,45 +2032,9 @@ function PlayerView({ pin, playerName, setView }) {
               }));
               
               console.log(`[${APP_VERSION}] Found existing player: ${foundPlayer.name}, ID: ${foundPlayer.id}`);
-              console.log(`[${APP_VERSION}] Player card state: "${foundPlayer.current_card || 'NO CARD'}"`);
               
-              // Immediately set current card if player has one
-              if (foundPlayer.current_card) {
-                console.log(`[${APP_VERSION}] Initial card received: "${foundPlayer.current_card}"`);
-                setCurrentCard(foundPlayer.current_card);
-                setLastKnownCard(foundPlayer.current_card);
-                lastCardContent.current = foundPlayer.current_card;
-                cardUpdateCountRef.current++;
-                
-                setDebugInfo(prev => ({ 
-                  ...prev, 
-                  lastAction: `Card poll update: ${foundPlayer.current_card || 'no card'}`,
-                  lastCardReceived: foundPlayer.current_card
-                }));
-                setLastCardUpdate(Date.now());
-                
-                if (foundPlayer.expires_at) {
-                  const expiry = new Date(foundPlayer.expires_at).getTime();
-                  const now = Date.now();
-                  const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
-                  setTimeLeft(remaining);
-                  
-                  // Estimate total time from session or use a reasonable default
-                  try {
-                    const sessionData = await room.collection('session').filter({ pin }).getList();
-                    if (sessionData && sessionData.length > 0) {
-                      const avgTime = (sessionData[0].min_time + sessionData[0].max_time) / 2;
-                      setTotalTime(avgTime);
-                    } else {
-                      setTotalTime(Math.max(remaining, 30)); // Fallback
-                    }
-                  } catch (err) {
-                    setTotalTime(Math.max(remaining, 30)); // Fallback
-                  }
-                }
-              }
-              
-              reportStatus('PlayerView', 'Found existing player', { id: foundPlayer.id });
+              // Process player data immediately
+              processPlayerData(foundPlayer);
               break;
             }
             
@@ -2283,7 +2055,6 @@ function PlayerView({ pin, playerName, setView }) {
                   15000
                 );
                 
-                reportStatus('PlayerView', 'Created new player', { id: newPlayer.id });
                 setPlayerId(newPlayer.id);
                 console.log(`[${APP_VERSION}] Created new player with ID: ${newPlayer.id}`);
                 setDebugInfo(prev => ({ 
@@ -2317,10 +2088,9 @@ function PlayerView({ pin, playerName, setView }) {
 
         setLoading(false);
         setConnectionStatus('connected');
-        initialSetupDone.current = true;
-        reportStatus('PlayerView', 'Player setup complete', { id: playerId });
+        console.log(`[${APP_VERSION}] Player setup complete, ID: ${playerId}`);
 
-        // More frequent polling for cards with detailed logging
+        // Set up continuous polling for player data (independently of React rendering)
         pollIntervalRef.current = setInterval(async () => {
           try {
             const polledPlayers = await room.collection('player')
@@ -2328,63 +2098,17 @@ function PlayerView({ pin, playerName, setView }) {
               .getList();
               
             if (polledPlayers && polledPlayers.length > 0) {
-              const player = polledPlayers[0];
-              
-              // Enhanced logging to track card updates
-              if (player.current_card !== currentCard) {
-                console.log(`[${APP_VERSION}] Poll received updated card: "${player.current_card}" (was: "${currentCard}")`);
-                lastCardContent.current = player.current_card;
-                setLastKnownCard(player.current_card);
-                cardUpdateCountRef.current++;
-              }
-              
-              // Always update the card if one exists
-              if (player.current_card) {
-                // Update card state and record receipt
-                setCurrentCard(player.current_card);
-                setLastCardUpdate(Date.now());
-                setDebugInfo(prev => ({ 
-                  ...prev, 
-                  lastAction: `Card poll update: ${player.current_card || 'no card'}`,
-                  lastCardReceived: player.current_card
-                }));
-                
-                if (player.expires_at) {
-                  const expiry = new Date(player.expires_at).getTime();
-                  const now = Date.now();
-                  const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
-                  setTimeLeft(remaining);
-                  
-                  // Use the total_duration_ms if available
-                  if (player.total_duration_ms) {
-                    setTotalTime(player.total_duration_ms / 1000);
-                  }
-                  // Calculate total time from expires_at and session settings (if available)
-                  else if (totalTime <= 0) {
-                    room.collection('session').filter({ pin }).getList().then(sessions => {
-                      if (sessions && sessions.length > 0) {
-                        const session = sessions[0];
-                        const avgTime = (session.min_time + session.max_time) / 2;
-                        setTotalTime(avgTime);
-                      } else {
-                        setTotalTime(Math.max(remaining + 5, 30)); // Fallback
-                      }
-                    }).catch(() => {
-                      setTotalTime(Math.max(remaining + 5, 30)); // Fallback on error
-                    });
-                  }
-                }
-              }
+              processPlayerData(polledPlayers[0]);
             }
           } catch (pollErr) {
             // Silent fail for polling - it's just a backup
           }
-        }, 1000); 
+        }, 1000);
 
-        // NEW: More aggressive card check that forces a new poll every 1.5 seconds
+        // Set up continuous card visibility verification
         cardCheckIntervalRef.current = setInterval(async () => {
-          // NEW: Periodically force a direct poll and refresh
           try {
+            // Direct poll to ensure cards are being received
             const polledPlayers = await room.collection('player')
               .filter({ session_pin: pin, name: playerName })
               .getList();
@@ -2392,37 +2116,43 @@ function PlayerView({ pin, playerName, setView }) {
             if (polledPlayers && polledPlayers.length > 0) {
               const player = polledPlayers[0];
               
-              // Force a state update for the card regardless
-              console.log(`[${APP_VERSION}] FORCE UPDATE check: Player has card: "${player.current_card || 'NONE'}"`);
+              // Force a reprocessing of player data
+              processPlayerData(player);
               
-              if (player.current_card) {
-                setLastKnownCard(player.current_card);
-                lastCardContent.current = player.current_card;
-                setCurrentCard(player.current_card);
+              // Verify card is displayed
+              const reactCardElement = document.querySelector('.card-text');
+              
+              if (player.current_card && player.current_card !== 'END' &&
+                  (!reactCardElement || reactCardElement.textContent !== player.current_card)) {
+                console.log(`[${APP_VERSION}] DISPLAY ERROR DETECTED: Card "${player.current_card}" not visible in DOM!`);
                 setForcedRefreshCount(prev => prev + 1);
                 
-                if (player.expires_at) {
-                  const expiry = new Date(player.expires_at).getTime();
-                  const now = Date.now();
-                  const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
-                  setTimeLeft(remaining);
-                  
-                  // Use the total_duration_ms if available
-                  if (player.total_duration_ms) {
-                    setTotalTime(player.total_duration_ms / 1000);
-                  }
-                }
+                // Force emergency mode if React display isn't working
+                setEmergencyModeActive(true);
               }
-              
-              if (player.current_card && player.current_card !== 'END' && timeLeft > 0) {
-                setCardVisibilityChecks(prev => prev + 1);
-                console.log(`[${APP_VERSION}] Card visibility check #${cardVisibilityChecks+1}: Card "${player.current_card}" is active with ${timeLeft}s remaining. Updates: ${cardUpdateCountRef.current}`);
+            }
+            
+            // Check for stale data
+            if (lastCardSyncTimestamp.current) {
+              const timeSinceLastSync = Date.now() - lastCardSyncTimestamp.current;
+              if (timeSinceLastSync > 15000) { // 15 seconds since last update
+                console.log(`[${APP_VERSION}] WARNING: No card updates for ${Math.round(timeSinceLastSync/1000)}s, forcing sync...`);
+                
+                // Force a direct poll
+                const refreshedPlayers = await room.collection('player')
+                  .filter({ session_pin: pin, name: playerName })
+                  .getList();
+                  
+                if (refreshedPlayers && refreshedPlayers.length > 0) {
+                  processPlayerData(refreshedPlayers[0]);
+                  lastCardSyncTimestamp.current = Date.now();
+                }
               }
             }
           } catch (error) {
             // Silent fail - this is just a backup check
           }
-        }, 1500);
+        }, 2000);
 
         // Set up subscription for real-time updates with improved error handling
         const setupPlayerSubscription = () => {
@@ -2431,59 +2161,13 @@ function PlayerView({ pin, playerName, setView }) {
           
           const attemptSubscribe = () => {
             try {
-              reportStatus('PlayerView', 'Subscribing to player updates', { 
-                attempt: retryAttempt + 1 
-              });
+              console.log(`[${APP_VERSION}] Setting up player subscription, attempt ${retryAttempt + 1}`);
               
               return room.collection('player')
                 .filter({ session_pin: pin, name: playerName })
                 .subscribe(playersList => {
                   if (playersList && playersList.length > 0) {
-                    const player = playersList[0];
-                    
-                    // Enhanced logging to track card updates
-                    if (player.current_card !== currentCard) {
-                      console.log(`[${APP_VERSION}] Subscription received updated card: "${player.current_card}" (was: "${currentCard}")`);
-                      lastCardContent.current = player.current_card;
-                      setLastKnownCard(player.current_card);
-                      cardUpdateCountRef.current++;
-                    }
-                    
-                    setCurrentCard(player.current_card);
-                    setLastCardUpdate(Date.now());
-                    setDebugInfo(prev => ({ 
-                      ...prev, 
-                      lastAction: `Player update: ${player.current_card || 'no card'}`,
-                      lastCardReceived: player.current_card
-                    }));
-
-                    if (player.expires_at) {
-                      const expiry = new Date(player.expires_at).getTime();
-                      const now = Date.now();
-                      const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
-                      setTimeLeft(remaining);
-                      
-                      // Use the total_duration_ms if available
-                      if (player.total_duration_ms) {
-                        setTotalTime(player.total_duration_ms / 1000);
-                      }
-                      // Calculate total time from expires_at and session settings (if available)
-                      else if (totalTime <= 0) {
-                        room.collection('session').filter({ pin }).getList().then(sessions => {
-                          if (sessions && sessions.length > 0) {
-                            const session = sessions[0];
-                            const avgTime = (session.min_time + session.max_time) / 2;
-                            setTotalTime(avgTime);
-                          } else {
-                            setTotalTime(Math.max(remaining + 5, 30)); // Fallback
-                          }
-                        }).catch(() => {
-                          setTotalTime(Math.max(remaining + 5, 30)); // Fallback on error
-                        });
-                      }
-                    } else if (!player.current_card || player.current_card === 'END') {
-                      setTimeLeft(0);
-                    }
+                    processPlayerData(playersList[0]);
                   }
                 });
             } catch (subErr) {
@@ -2510,7 +2194,10 @@ function PlayerView({ pin, playerName, setView }) {
         if (retries < 3) {
           setRetries(prev => prev + 1);
           setConnectionStatus(`retrying (${retries + 1}/3)`);
-          setTimeout(() => setupPlayer(), 2000); 
+          setTimeout(() => {
+            initialSetupDone.current = false; // Allow retry
+            setupPlayer();
+          }, 2000);
         } else {
           setError('Failed to connect to session. Please try again.');
           setLoading(false);
@@ -2563,7 +2250,7 @@ function PlayerView({ pin, playerName, setView }) {
           
           // When timer expires, check if we have a new card
           if (newTime <= 0 && currentCard) {
-            // When timer expires, check if we have a new card
+            // Poll for new card when timer expires
             setTimeout(async () => {
               try {
                 const players = await room.collection('player')
@@ -2571,20 +2258,7 @@ function PlayerView({ pin, playerName, setView }) {
                   .getList();
                 
                 if (players && players.length > 0) {
-                  const updatedPlayer = players[0];
-                  setCurrentCard(updatedPlayer.current_card);
-                  setLastKnownCard(updatedPlayer.current_card);
-                  lastCardContent.current = updatedPlayer.current_card;
-                  setLastCardUpdate(Date.now());
-                  
-                  if (updatedPlayer.expires_at) {
-                    const expiry = new Date(updatedPlayer.expires_at).getTime();
-                    const now = Date.now();
-                    const newRemaining = Math.max(0, Math.floor((expiry - now) / 1000));
-                    if (newRemaining > 0) {
-                      setTimeLeft(newRemaining);
-                    }
-                  }
+                  processPlayerData(players[0]);
                 }
               } catch (err) {
                 logError('Error getting updated player info after timer expired', err);
@@ -2597,6 +2271,9 @@ function PlayerView({ pin, playerName, setView }) {
       }, 100); 
 
       return () => {
+        if (directDisplayCountdownIntervalRef.current) {
+          clearInterval(directDisplayCountdownIntervalRef.current);
+        }
         if (timerRef.current) {
           clearInterval(timerRef.current);
         }
@@ -2606,63 +2283,20 @@ function PlayerView({ pin, playerName, setView }) {
     }
   }, [currentCard, timeLeft, pin, playerName]);
 
-  // Reconnect logic if no card updates are received for a long time
+  // CRITICAL: Extra emergency check for cases where React doesn't update
   useEffect(() => {
-    let reconnectTimer;
-    
-    // If we're in active session but haven't received a card update in a while
-    if (isSessionActive && lastCardUpdate && Date.now() - lastCardUpdate > 30000) {
-      reconnectTimer = setTimeout(() => {
-        reportStatus('PlayerView', 'Attempting reconnect due to inactivity', {
-          lastUpdate: lastCardUpdate ? new Date(lastCardUpdate).toISOString() : 'never',
-          reconnectAttempt: reconnectAttempts + 1
-        });
-        
-        setReconnectAttempts(prev => prev + 1);
-        
-        // Reset our subscription by forcing a retry
-        setRetries(prev => prev + 1); 
-        
-        // Also directly poll for latest card
-        room.collection('player')
-          .filter({ session_pin: pin, name: playerName })
-          .getList()
-          .then(players => {
-            if (players && players.length > 0) {
-              const player = players[0];
-              setCurrentCard(player.current_card);
-              setLastKnownCard(player.current_card);
-              lastCardContent.current = player.current_card;
-              setLastCardUpdate(Date.now());
-              
-              if (player.expires_at) {
-                const expiry = new Date(player.expires_at).getTime();
-                const now = Date.now();
-                const remaining = Math.max(0, Math.floor((expiry - now) / 1000));
-                setTimeLeft(remaining);
-              }
-            }
-          })
-          .catch(err => {
-            logError('Failed to poll during reconnect', err);
-          });
-          
-      }, 5000);
+    // Force card display if card was received but not showing
+    if (lastKnownCard && !currentCard && lastKnownCard !== 'END') {
+      console.log(`[${APP_VERSION}] CRITICAL FIX: Restoring missing card "${lastKnownCard}"`);
+      setCurrentCard(lastCardContent.current);
+      setForcedRefreshCount(prev => prev + 1);
     }
     
-    return () => {
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-    };
-  }, [isSessionActive, lastCardUpdate, reconnectAttempts, pin, playerName]);
-
-  // Force card display using last known card content if needed 
-  useEffect(() => {
-    if (!currentCard && lastKnownCard && lastKnownCard !== 'END') {
-      console.log(`[${APP_VERSION}] VISIBILITY FIX: Restoring last known card: "${lastKnownCard}"`);
-      setCurrentCard(lastKnownCard);
-    }
+    // Update direct display whenever currentCard changes
+    updateDirectDisplay();
   }, [currentCard, lastKnownCard]);
 
+  // Calculate progress percentage for timer bar
   const getProgressWidth = () => {
     if (timeLeft <= 0 || totalTime <= 0) return 0;
     // Smooth calculation with better precision
@@ -2670,26 +2304,15 @@ function PlayerView({ pin, playerName, setView }) {
     return Math.min(100, Math.max(0, percentage)); 
   };
 
-  // CRITICAL: Even more aggressive force update mechanism
+  // Reset emergency mode when loading
   useEffect(() => {
-    // Create an interval that forcibly rerenders every 3 seconds if we have a card
-    const forceRenderInterval = setInterval(() => {
-      if (lastKnownCard && lastKnownCard !== 'END') {
-        // Force the current card to update to the last known card
-        console.log(`[${APP_VERSION}] FORCE RENDER: Setting card to "${lastKnownCard}"`);
-        setCurrentCard(lastKnownCard);
-        
-        // Also directly update the DOM as an ultra fallback
-        const cardTextElement = document.querySelector('.card-text');
-        if (cardTextElement && cardTextElement.textContent !== lastKnownCard) {
-          console.log(`[${APP_VERSION}] DIRECT DOM UPDATE to card: "${lastKnownCard}"`);
-          cardTextElement.textContent = lastKnownCard;
-        }
+    if (loading) {
+      setEmergencyModeActive(false);
+      if (directRenderBypassRef.current) {
+        directRenderBypassRef.current.style.display = 'none';
       }
-    }, 3000);
-    
-    return () => clearInterval(forceRenderInterval);
-  }, [lastKnownCard]);
+    }
+  }, [loading]);
 
   if (loading) {
     return (
@@ -2759,10 +2382,9 @@ function PlayerView({ pin, playerName, setView }) {
     );
   }
 
-  // ENHANCED Card display rendering with alerts for debugging
-  console.log(`[${APP_VERSION}] Rendering card: "${currentCard || 'NO CARD'}", Timer: ${timeLeft}s, Updates: ${cardUpdateCountRef.current}, Forced: ${forcedRefreshCount}`);
+  console.log(`[${APP_VERSION}] Rendering card view: "${currentCard || 'NO CARD'}", Timer: ${timeLeft}s, Updates: ${cardUpdateCountRef.current}, Forced: ${forcedRefreshCount} `);
 
-  // NEW: Force display of card from lastKnownCard if current is null but we should have one
+  // Display card using either current or last known card
   const displayCard = currentCard || lastKnownCard;
 
   return (
@@ -2794,9 +2416,24 @@ function PlayerView({ pin, playerName, setView }) {
               ></div>
             </div>
             
+            {/* Emergency mode indicator */}
+            {emergencyModeActive && (
+              <div style={{ 
+                marginTop: '10px', 
+                padding: '5px 10px',
+                backgroundColor: '#fffde7', 
+                border: '1px solid #ffd700',
+                borderRadius: '4px',
+                fontSize: '12px',
+                display: 'inline-block'
+              }}>
+                Emergency backup active
+              </div>
+            )}
+            
             {/* Card status indicator */}
             <div style={{ 
-              marginTop: '20px', 
+              marginTop: '5px', 
               fontSize: '12px', 
               color: '#888',
               textAlign: 'center' 
@@ -2804,9 +2441,9 @@ function PlayerView({ pin, playerName, setView }) {
               {forcedRefreshCount > 0 ? `Card restored ${forcedRefreshCount} times` : 'Card received normally'}
             </div>
             
-            {/* Hidden debug link that shows more info when double-clicked */}
+            {/* Hidden debug info */}
             <div 
-              onDoubleClick={() => alert(`Debug: Card="${displayCard}", Time=${timeLeft}s, Total=${totalTime}s, Last received=${debugInfo.lastCardReceived}, PlayerId=${debugInfo.playerId || 'unknown'}, Status=${connectionStatus}, Updates=${cardUpdateCountRef.current}`)}
+              onDoubleClick={() => alert(`Debug: Card="${displayCard}", Time=${timeLeft}s, Total=${totalTime}s, Updates=${cardUpdateCountRef.current}, Emergency=${emergencyModeActive ? 'YES' : 'NO'}`)}
               style={{ fontSize: '10px', color: '#fff', position: 'absolute', bottom: '5px', right: '5px', cursor: 'default' }}
             >
               v{APP_VERSION}
@@ -2831,13 +2468,45 @@ function PlayerView({ pin, playerName, setView }) {
               Version: {APP_VERSION}
             </p>
             
+            {/* Add reconnect button */}
+            <button 
+              className="btn"
+              onClick={() => {
+                console.log(`[${APP_VERSION}] Manual reconnect initiated`);
+                setReconnectAttempts(prev => prev + 1);
+                setConnectionStatus('manually reconnecting...');
+                
+                // Reset the player view
+                initialSetupDone.current = false;
+                
+                // Force a reload of player data
+                room.collection('player')
+                  .filter({ session_pin: pin, name: playerName })
+                  .getList()
+                  .then(players => {
+                    if (players && players.length > 0) {
+                      processPlayerData(players[0]);
+                      setConnectionStatus('reconnected');
+                    }
+                  })
+                  .catch(err => {
+                    console.error(`[${APP_VERSION}] Manual reconnect error:`, err);
+                    setConnectionStatus('reconnect failed');
+                  });
+              }}
+              style={{ marginTop: '15px' }}
+            >
+              Reconnect
+            </button>
+            
             {/* Last known card status for debugging */}
             {lastKnownCard && (
               <p style={{ marginTop: '15px', fontSize: '12px', color: '#888' }}>
-                <button onClick={() => {
+                <button onTouchStart={() => {
                   console.log(`[${APP_VERSION}] Manual restore of card: "${lastKnownCard}"`);
-                  setCurrentCard(lastKnownCard);
+                  setCurrentCard(lastCardContent.current);
                   setForcedRefreshCount(prev => prev + 1);
+                  setEmergencyModeActive(true);
                 }} className="btn btn-small">
                   Force Restore Card
                 </button>
