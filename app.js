@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.0.0";
+const APP_VERSION = "2.1.0 (build 245)";
 
 const { useState, useEffect, useRef, useCallback } = React;
 const { createRoot } = ReactDOM;
@@ -60,10 +60,12 @@ function ConductorView({ onNavigate }) {
   const [players, setPlayers] = useState([]);
   const [selectedDeck, setSelectedDeck] = useState('');
   const [distributionMode, setDistributionMode] = useState('unison');
-  const [timerSeconds, setTimerSeconds] = useState(60);
+  const [minTimerSeconds, setMinTimerSeconds] = useState(30);
+  const [maxTimerSeconds, setMaxTimerSeconds] = useState(90);
   const [newDeckName, setNewDeckName] = useState('');
   const [newDeckCards, setNewDeckCards] = useState('');
   const fileInputRef = useRef(null);
+  const playersSubscriptionRef = useRef(null);
 
   // Load decks
   useEffect(() => {
@@ -85,6 +87,56 @@ function ConductorView({ onNavigate }) {
 
     loadDecks();
   }, []);
+
+  // Manual refresh for player list
+  const refreshPlayerList = async () => {
+    if (!pin) return;
+
+    try {
+      setLoading(true);
+      setError('');
+      const playerList = await safeOperation(() =>
+        room.collection('player')
+          .filter({ session_pin: pin })
+          .getList()
+      );
+      setPlayers(playerList);
+      setSuccess('Player list refreshed');
+      setTimeout(() => setSuccess(''), 2000);
+    } catch (error) {
+      setError('Failed to refresh player list');
+      console.error('Error refreshing players:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Setup player subscription
+  const setupPlayerSubscription = useCallback(() => {
+    if (!pin) return;
+
+    // Clean up previous subscription if it exists
+    if (playersSubscriptionRef.current) {
+      playersSubscriptionRef.current();
+      playersSubscriptionRef.current = null;
+    }
+
+    try {
+      // Create new subscription
+      const unsubscribe = room.collection('player')
+        .filter({ session_pin: pin })
+        .subscribe(updatedPlayers => {
+          console.log(`[${APP_VERSION}] Player update received, count:`, updatedPlayers.length);
+          setPlayers(updatedPlayers);
+        });
+
+      playersSubscriptionRef.current = unsubscribe;
+      console.log(`[${APP_VERSION}] Player subscription set up for PIN:`, pin);
+    } catch (error) {
+      console.error(`[${APP_VERSION}] Error setting up player subscription:`, error);
+      setError('Error setting up player tracking. Try refreshing the page.');
+    }
+  }, [pin]);
 
   // Create new deck
   const handleCreateDeck = async () => {
@@ -247,7 +299,8 @@ function ConductorView({ onNavigate }) {
           pin: sessionPin,
           active: true,
           distribution_mode: distributionMode,
-          timer_seconds: timerSeconds,
+          min_timer_seconds: minTimerSeconds,
+          max_timer_seconds: maxTimerSeconds,
           active_deck_id: selectedDeck,
           ended: false
         })
@@ -258,6 +311,11 @@ function ConductorView({ onNavigate }) {
       setStep('session');
       setSuccess(`Session created with PIN: ${sessionPin}`);
 
+      // Set up player subscription immediately after creating session
+      setTimeout(() => {
+        setupPlayerSubscription();
+      }, 500);
+
       setTimeout(() => setSuccess(''), 3000);
     } catch (error) {
       setError('Failed to create session');
@@ -267,22 +325,19 @@ function ConductorView({ onNavigate }) {
     }
   };
 
-  // Subscribe to players when session is active
+  // Subscribe to players when pin changes
   useEffect(() => {
-    if (!pin) return;
-
-    const unsubscribe = room.collection('player')
-      .filter({ session_pin: pin })
-      .subscribe(updatedPlayers => {
-        setPlayers(updatedPlayers);
-      });
+    if (pin) {
+      setupPlayerSubscription();
+    }
 
     return () => {
-      if (typeof unsubscribe === 'function') {
-        unsubscribe();
+      if (playersSubscriptionRef.current) {
+        playersSubscriptionRef.current();
+        playersSubscriptionRef.current = null;
       }
     };
-  }, [pin]);
+  }, [pin, setupPlayerSubscription]);
 
   // Distribute cards
   const handleDistributeCards = async () => {
@@ -318,13 +373,18 @@ function ConductorView({ onNavigate }) {
         const selectedCard = cards[randomIndex];
 
         for (const player of players) {
+          // Generate random duration between min and max timer settings
+          const randomDuration = Math.floor(
+            Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
+          );
+
           await safeOperation(() =>
             room.collection('player').update(player.id, {
               current_card: selectedCard,
               current_deck_name: activeDeck.name,
               current_deck_id: activeDeck.id,
               card_start_time: new Date().toISOString(),
-              card_duration: timerSeconds
+              card_duration: randomDuration
             })
           );
         }
@@ -336,13 +396,18 @@ function ConductorView({ onNavigate }) {
           const cardIndex = i % shuffledCards.length; // Wrap around if more players than cards
           const selectedCard = shuffledCards[cardIndex];
 
+          // Generate random duration between min and max timer settings
+          const randomDuration = Math.floor(
+            Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
+          );
+
           await safeOperation(() =>
             room.collection('player').update(players[i].id, {
               current_card: selectedCard,
               current_deck_name: activeDeck.name,
               current_deck_id: activeDeck.id,
               card_start_time: new Date().toISOString(),
-              card_duration: timerSeconds
+              card_duration: randomDuration
             })
           );
         }
@@ -352,13 +417,18 @@ function ConductorView({ onNavigate }) {
           const randomIndex = Math.floor(Math.random() * cards.length);
           const selectedCard = cards[randomIndex];
 
+          // Generate random duration between min and max timer settings
+          const randomDuration = Math.floor(
+            Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
+          );
+
           await safeOperation(() =>
             room.collection('player').update(player.id, {
               current_card: selectedCard,
               current_deck_name: activeDeck.name,
               current_deck_id: activeDeck.id,
               card_start_time: new Date().toISOString(),
-              card_duration: timerSeconds
+              card_duration: randomDuration
             })
           );
         }
@@ -369,10 +439,14 @@ function ConductorView({ onNavigate }) {
         room.collection('session').update(sessionId, {
           last_distribution: new Date().toISOString(),
           distribution_mode: distributionMode,
-          timer_seconds: timerSeconds,
+          min_timer_seconds: minTimerSeconds,
+          max_timer_seconds: maxTimerSeconds,
           active_deck_id: selectedDeck
         })
       );
+
+      // Refresh player list after distribution
+      setTimeout(refreshPlayerList, 1000);
 
       setSuccess(`Cards distributed to ${players.length} players`);
       setTimeout(() => setSuccess(''), 3000);
@@ -465,15 +539,43 @@ function ConductorView({ onNavigate }) {
             </select>
           </div>
           <div>
-            <label>Timer (seconds):</label>
-            <input
-              type="number"
-              className="input"
-              value={timerSeconds}
-              min="5"
-              max="300"
-              onChange={(e) => setTimerSeconds(Math.max(5, parseInt(e.target.value) || 60))}
-            />
+            <label>Timer Duration (random between min and max):</label>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <div style={{ flex: 1 }}>
+                <label>Minimum (seconds):</label>
+                <input
+                  type="number"
+                  className="input"
+                  value={minTimerSeconds}
+                  min="5"
+                  max="300"
+                  onChange={(e) => {
+                    const value = Math.max(5, parseInt(e.target.value) || 5);
+                    setMinTimerSeconds(value);
+                    if (value > maxTimerSeconds) {
+                      setMaxTimerSeconds(value);
+                    }
+                  }}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label>Maximum (seconds):</label>
+                <input
+                  type="number"
+                  className="input"
+                  value={maxTimerSeconds}
+                  min="5"
+                  max="300"
+                  onChange={(e) => {
+                    const value = Math.max(
+                      minTimerSeconds,
+                      parseInt(e.target.value) || minTimerSeconds
+                    );
+                    setMaxTimerSeconds(value);
+                  }}
+                />
+              </div>
+            </div>
           </div>
 
           <button
@@ -594,7 +696,17 @@ function ConductorView({ onNavigate }) {
           </button>
         </div>
 
-        <h3 className="subheader">Players ({players.length})</h3>
+        <h3 className="subheader">
+          Players ({players.length})
+          <button
+            className="btn btn-outline"
+            style={{ marginLeft: '10px', padding: '5px 10px', fontSize: '14px' }}
+            onClick={refreshPlayerList}
+            disabled={loading}
+          >
+            {loading ? 'Refreshing...' : 'Refresh'}
+          </button>
+        </h3>
         {players.length > 0 ? (
           <div
             style={{
@@ -613,7 +725,8 @@ function ConductorView({ onNavigate }) {
                   </div>
                   {player.current_card && player.current_card !== 'END' && (
                     <div className="player-card">
-                      {player.current_card}
+                      <div><strong>Card:</strong> {player.current_card}</div>
+                      <div><strong>Deck:</strong> {player.current_deck_name || "Unknown"}</div>
                       {player.card_start_time && player.card_duration && (
                         <PlayerTimer
                           startTime={player.card_start_time}
@@ -630,7 +743,13 @@ function ConductorView({ onNavigate }) {
             ))}
           </div>
         ) : (
-          <p className="notice">No players have joined yet</p>
+          <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f9f9f9', borderRadius: '4px' }}>
+            <p style={{ marginBottom: '10px' }}>No players have joined yet. Share the link/PIN above with players.</p>
+            <p className="notice">
+              If you believe players have joined but they're not showing here, use the Refresh button above.
+              <br />You can also try reopening the session.
+            </p>
+          </div>
         )}
 
         <h3 className="subheader">Distribution Controls</h3>
@@ -647,15 +766,43 @@ function ConductorView({ onNavigate }) {
           </select>
         </div>
         <div>
-          <label>Timer (seconds):</label>
-          <input
-            type="number"
-            className="input"
-            value={timerSeconds}
-            min="5"
-            max="300"
-            onChange={(e) => setTimerSeconds(Math.max(5, parseInt(e.target.value) || 60))}
-          />
+          <label>Timer Duration (random between min and max):</label>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <div style={{ flex: 1 }}>
+              <label>Minimum (seconds):</label>
+              <input
+                type="number"
+                className="input"
+                value={minTimerSeconds}
+                min="5"
+                max="300"
+                onChange={(e) => {
+                  const value = Math.max(5, parseInt(e.target.value) || 5);
+                  setMinTimerSeconds(value);
+                  if (value > maxTimerSeconds) {
+                    setMaxTimerSeconds(value);
+                  }
+                }}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label>Maximum (seconds):</label>
+              <input
+                type="number"
+                className="input"
+                value={maxTimerSeconds}
+                min="5"
+                max="300"
+                onChange={(e) => {
+                  const value = Math.max(
+                    minTimerSeconds,
+                    parseInt(e.target.value) || minTimerSeconds
+                  );
+                  setMaxTimerSeconds(value);
+                }}
+              />
+            </div>
+          </div>
         </div>
         <div>
           <label>Select Deck:</label>

@@ -1,14 +1,15 @@
 /* Base styles */
 :root {
-  --primary: #333;
-  --background: #f5f5f5;
+  --primary: #ff4e8a;  /* Pink */
+  --background: #ffe6f2; /* Light pink background */
   --card-bg: #fff;
-  --border: #ddd;
-  --text: #333;
+  --border: #ffb6d6; /* Light pink border */
+  --text: #444;
   --text-light: #777;
-  --accent: #3498db;
+  --accent: #9c6bff; /* Purple accent */
   --error: #e74c3c;
   --success: #2ecc71;
+  --shadow: rgba(255, 78, 138, 0.2);
 }
 
 * {
@@ -21,6 +22,7 @@
 
 body {
   background-color: var(--background);
+  background-image: linear-gradient(135deg, var(--background) 0%, #fff8fd 100%);
   overflow: hidden;
   width: 100vw;
   height: 100vh;
@@ -45,17 +47,18 @@ button, input, select, textarea {
 /* Card and UI components */
 .card {
   background-color: var(--card-bg);
-  border-radius: 8px;
+  border-radius: 16px;
   padding: 20px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 8px 20px var(--shadow);
   margin-bottom: 20px;
+  border: 1px solid var(--border);
 }
 
 .full-card {
   background-color: var(--card-bg);
-  border-radius: 8px;
+  border-radius: 16px;
   padding: 30px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 10px 25px var(--shadow);
   position: absolute;
   top: 50%;
   left: 50%;
@@ -63,37 +66,44 @@ button, input, select, textarea {
   width: 90%;
   max-width: 500px;
   text-align: center;
+  border: 1px solid var(--border);
 }
 
 .btn {
   background-color: var(--primary);
   color: white;
   border: none;
-  border-radius: 4px;
-  padding: 10px 15px;
+  border-radius: 30px;
+  padding: 12px 20px;
   font-size: 16px;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: all 0.2s;
   display: inline-block;
   margin: 5px 0;
+  font-weight: 500;
+  box-shadow: 0 4px 8px var(--shadow);
 }
 
 .btn:hover {
   opacity: 0.9;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 12px var(--shadow);
 }
 
 .btn:active {
   opacity: 0.8;
+  transform: translateY(0);
+  box-shadow: 0 4px 8px var(--shadow);
 }
 
 .btn-outline {
   background-color: transparent;
   color: var(--primary);
-  border: 1px solid var(--primary);
+  border: 2px solid var(--primary);
 }
 
 .btn-outline:hover {
-  background-color: rgba(0, 0, 0, 0.05);
+  background-color: rgba(255, 78, 138, 0.1);
 }
 
 .btn-block {
@@ -103,40 +113,50 @@ button, input, select, textarea {
 
 .input {
   width: 100%;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  padding: 12px;
+  border: 2px solid var(--border);
+  border-radius: 8px;
   font-size: 16px;
   margin-bottom: 15px;
+  transition: border-color 0.2s;
+}
+
+.input:focus {
+  border-color: var(--primary);
+  outline: none;
 }
 
 .header {
-  font-size: 24px;
+  font-size: 28px;
   margin-bottom: 20px;
   font-weight: 600;
+  color: var(--primary);
 }
 
 .subheader {
-  font-size: 18px;
+  font-size: 20px;
   margin-bottom: 15px;
   font-weight: 500;
+  color: var(--accent);
 }
 
 /* Messages */
 .error {
   color: var(--error);
   background-color: rgba(231, 76, 60, 0.1);
-  padding: 10px;
-  border-radius: 4px;
+  padding: 12px;
+  border-radius: 8px;
   margin: 10px 0;
+  border: 1px solid rgba(231, 76, 60, 0.3);
 }
 
 .success {
   color: var(--success);
   background-color: rgba(46, 204, 113, 0.1);
-  padding: 10px;
-  border-radius: 4px;
+  padding: 12px;
+  border-radius: 8px;
   margin: 10px 0;
+  border: 1px solid rgba(46, 204, 113, 0.3);
 }
 
 .notice {
@@ -148,9 +168,9 @@ button, input, select, textarea {
 /* Timer */
 .timer-bar {
   width: 100%;
-  height: 6px;
+  height: 8px;
   background-color: var(--border);
-  border-radius: 3px;
+  border-radius: 4px;
   overflow: hidden;
   margin: 15px 0;
 }
@@ -158,6 +178,7 @@ button, input, select, textarea {
 .timer-progress {
   height: 100%;
   background-color: var(--primary);
+  background-image: linear-gradient(90deg, var(--primary), var(--accent));
   transition: width 0.5s linear;
 }
 
@@ -168,7 +189,7 @@ button, input, select, textarea {
 }
 
 .list-item {
-  padding: 10px;
+  padding: 12px;
   border-bottom: 1px solid var(--border);
   display: flex;
   justify-content: space-between;
@@ -181,10 +202,11 @@ button, input, select, textarea {
 
 /* Card Display */
 .card-text {
-  font-size: 28px;
+  font-size: 32px;
   font-weight: 600;
   margin: 20px 0;
   line-height: 1.4;
+  color: var(--primary);
 }
 
 /* Loading spinner */
@@ -195,6 +217,7 @@ button, input, select, textarea {
   width: 100%;
   height: 100%;
   background-color: var(--background);
+  background-image: linear-gradient(135deg, var(--background) 0%, #fff8fd 100%);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -205,7 +228,7 @@ button, input, select, textarea {
 .loading-spinner {
   width: 40px;
   height: 40px;
-  border: 4px solid rgba(0, 0, 0, 0.1);
+  border: 4px solid rgba(255, 78, 138, 0.2);
   border-radius: 50%;
   border-top-color: var(--primary);
   animation: spin 1s linear infinite;
@@ -223,7 +246,10 @@ button, input, select, textarea {
   bottom: 10px;
   right: 10px;
   font-size: 12px;
-  color: var(--text-light);
+  color: var(--primary);
+  background-color: rgba(255, 255, 255, 0.7);
+  padding: 4px 8px;
+  border-radius: 10px;
   opacity: 0.7;
 }
 
@@ -231,24 +257,33 @@ button, input, select, textarea {
 .player-item {
   display: flex;
   justify-content: space-between;
-  padding: 8px;
+  padding: 12px;
   border-bottom: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 5px;
+  transition: background-color 0.2s;
+}
+
+.player-item:hover {
+  background-color: rgba(255, 78, 138, 0.05);
 }
 
 .player-card {
-  background-color: rgba(0, 0, 0, 0.03);
-  padding: 8px;
-  border-radius: 4px;
+  background-color: rgba(255, 78, 138, 0.08);
+  padding: 10px;
+  border-radius: 8px;
   margin-top: 5px;
   font-style: italic;
   font-size: 14px;
+  border: 1px solid var(--border);
 }
 
 .deck-selector {
-  background-color: rgba(0, 0, 0, 0.02);
-  border-radius: 4px;
-  padding: 10px;
-  margin: 10px 0;
+  background-color: rgba(255, 78, 138, 0.05);
+  border-radius: 8px;
+  padding: 15px;
+  margin: 15px 0;
+  border: 1px solid var(--border);
 }
 
 /* Media queries */
@@ -262,10 +297,10 @@ button, input, select, textarea {
   }
   
   .header {
-    font-size: 20px;
+    font-size: 24px;
   }
   
   .card-text {
-    font-size: 24px;
+    font-size: 28px;
   }
 }
