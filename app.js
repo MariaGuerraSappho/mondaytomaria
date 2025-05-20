@@ -1,7 +1,7 @@
 // App version
-const APP_VERSION = "2.1.0 (build 245)";
+const APP_VERSION = "2.2.0 (build 247)";
 
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
 
 // Initialize WebsimSocket
@@ -100,6 +100,7 @@ function ConductorView({ onNavigate }) {
           .filter({ session_pin: pin })
           .getList()
       );
+      console.log(`[${APP_VERSION}] Refreshed player list:`, playerList);
       setPlayers(playerList);
       setSuccess('Player list refreshed');
       setTimeout(() => setSuccess(''), 2000);
@@ -194,6 +195,8 @@ function ConductorView({ onNavigate }) {
 
       const text = await file.text();
       let deckData;
+      let successCount = 0;
+      let errorCount = 0;
 
       try {
         // Try parsing as JSON
@@ -201,18 +204,23 @@ function ConductorView({ onNavigate }) {
 
         // Handle array of decks
         if (Array.isArray(deckData)) {
-          let createdCount = 0;
-
           for (const deck of deckData) {
             if (deck.name && Array.isArray(deck.cards) && deck.cards.length > 0) {
-              await safeOperation(() =>
-                room.collection('deck').create({
-                  name: deck.name,
-                  cards: deck.cards.filter(card => card && card.trim()),
-                  card_count: deck.cards.filter(card => card && card.trim()).length
-                })
-              );
-              createdCount++;
+              try {
+                await safeOperation(() =>
+                  room.collection('deck').create({
+                    name: deck.name,
+                    cards: deck.cards.filter(card => card && card.trim()),
+                    card_count: deck.cards.filter(card => card && card.trim()).length
+                  })
+                );
+                successCount++;
+              } catch (err) {
+                errorCount++;
+                console.error(`Error importing deck ${deck.name}:`, err);
+              }
+            } else {
+              errorCount++;
             }
           }
 
@@ -222,24 +230,28 @@ function ConductorView({ onNavigate }) {
           if (updatedDecks.length > 0 && !selectedDeck) {
             setSelectedDeck(updatedDecks[0].id);
           }
-
-          setSuccess(`Successfully imported ${createdCount} decks`);
         }
         // Handle single deck
         else if (deckData.name && Array.isArray(deckData.cards)) {
-          const deck = await safeOperation(() =>
-            room.collection('deck').create({
-              name: deckData.name,
-              cards: deckData.cards.filter(card => card && card.trim()),
-              card_count: deckData.cards.filter(card => card && card.trim()).length
-            })
-          );
-
-          setDecks(prevDecks => [deck, ...prevDecks]);
-          setSelectedDeck(deck.id);
-          setSuccess(`Successfully imported deck "${deckData.name}"`);
+          try {
+            const deck = await safeOperation(() =>
+              room.collection('deck').create({
+                name: deckData.name,
+                cards: deckData.cards.filter(card => card && card.trim()),
+                card_count: deckData.cards.filter(card => card && card.trim()).length
+              })
+            );
+            
+            setDecks(prevDecks => [deck, ...prevDecks]);
+            setSelectedDeck(deck.id);
+            successCount = 1;
+          } catch (err) {
+            errorCount = 1;
+            console.error(`Error importing deck ${deckData.name}:`, err);
+          }
         } else {
           setError('Invalid JSON format');
+          errorCount = 1;
         }
       } catch (jsonError) {
         // Try parsing as text (first line is name, rest are cards)
@@ -254,17 +266,22 @@ function ConductorView({ onNavigate }) {
         const name = lines[0];
         const cards = lines.slice(1);
 
-        const deck = await safeOperation(() =>
-          room.collection('deck').create({
-            name,
-            cards,
-            card_count: cards.length
-          })
-        );
+        try {
+          const deck = await safeOperation(() =>
+            room.collection('deck').create({
+              name,
+              cards,
+              card_count: cards.length
+            })
+          );
 
-        setDecks(prevDecks => [deck, ...prevDecks]);
-        setSelectedDeck(deck.id);
-        setSuccess(`Successfully imported deck "${name}"`);
+          setDecks(prevDecks => [deck, ...prevDecks]);
+          setSelectedDeck(deck.id);
+          successCount = 1;
+        } catch (err) {
+          errorCount = 1;
+          console.error(`Error importing text deck ${name}:`, err);
+        }
       }
 
       // Clear file input
@@ -272,6 +289,7 @@ function ConductorView({ onNavigate }) {
         fileInputRef.current.value = '';
       }
 
+      setSuccess(`Upload complete! Added ${successCount} deck${successCount !== 1 ? 's' : ''}, failed ${errorCount}`);
       setTimeout(() => setSuccess(''), 3000);
     } catch (error) {
       setError('Failed to process file');
@@ -329,6 +347,8 @@ function ConductorView({ onNavigate }) {
   useEffect(() => {
     if (pin) {
       setupPlayerSubscription();
+      // Initial player list fetch
+      refreshPlayerList();
     }
 
     return () => {
@@ -365,12 +385,14 @@ function ConductorView({ onNavigate }) {
       }
 
       const cards = activeDeck.cards;
+      console.log(`[${APP_VERSION}] Distribution started: deck=${activeDeck.name}, mode=${distributionMode}, players=${players.length}`);
 
       // Distribute cards based on mode
       if (distributionMode === 'unison') {
         // Everyone gets the same card
         const randomIndex = Math.floor(Math.random() * cards.length);
         const selectedCard = cards[randomIndex];
+        console.log(`[${APP_VERSION}] Unison mode: selected card "${selectedCard}"`);
 
         for (const player of players) {
           // Generate random duration between min and max timer settings
@@ -378,19 +400,26 @@ function ConductorView({ onNavigate }) {
             Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
           );
 
-          await safeOperation(() =>
-            room.collection('player').update(player.id, {
-              current_card: selectedCard,
-              current_deck_name: activeDeck.name,
-              current_deck_id: activeDeck.id,
-              card_start_time: new Date().toISOString(),
-              card_duration: randomDuration
-            })
-          );
+          console.log(`[${APP_VERSION}] Assigning card to ${player.name}, duration=${randomDuration}s`);
+          
+          try {
+            await safeOperation(() =>
+              room.collection('player').update(player.id, {
+                current_card: selectedCard,
+                current_deck_name: activeDeck.name,
+                current_deck_id: activeDeck.id,
+                card_start_time: new Date().toISOString(),
+                card_duration: randomDuration
+              })
+            );
+          } catch (err) {
+            console.error(`[${APP_VERSION}] Failed to update player ${player.name}:`, err);
+          }
         }
       } else if (distributionMode === 'unique') {
         // Each player gets a unique card if possible
         const shuffledCards = [...cards].sort(() => Math.random() - 0.5);
+        console.log(`[${APP_VERSION}] Unique mode: shuffled ${shuffledCards.length} cards`);
 
         for (let i = 0; i < players.length; i++) {
           const cardIndex = i % shuffledCards.length; // Wrap around if more players than cards
@@ -401,18 +430,26 @@ function ConductorView({ onNavigate }) {
             Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
           );
 
-          await safeOperation(() =>
-            room.collection('player').update(players[i].id, {
-              current_card: selectedCard,
-              current_deck_name: activeDeck.name,
-              current_deck_id: activeDeck.id,
-              card_start_time: new Date().toISOString(),
-              card_duration: randomDuration
-            })
-          );
+          console.log(`[${APP_VERSION}] Assigning card "${selectedCard}" to ${players[i].name}, duration=${randomDuration}s`);
+          
+          try {
+            await safeOperation(() =>
+              room.collection('player').update(players[i].id, {
+                current_card: selectedCard,
+                current_deck_name: activeDeck.name,
+                current_deck_id: activeDeck.id,
+                card_start_time: new Date().toISOString(),
+                card_duration: randomDuration
+              })
+            );
+          } catch (err) {
+            console.error(`[${APP_VERSION}] Failed to update player ${players[i].name}:`, err);
+          }
         }
       } else if (distributionMode === 'random') {
         // Each player gets a random card (duplicates allowed)
+        console.log(`[${APP_VERSION}] Random mode: selecting from ${cards.length} cards`);
+        
         for (const player of players) {
           const randomIndex = Math.floor(Math.random() * cards.length);
           const selectedCard = cards[randomIndex];
@@ -422,15 +459,21 @@ function ConductorView({ onNavigate }) {
             Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
           );
 
-          await safeOperation(() =>
-            room.collection('player').update(player.id, {
-              current_card: selectedCard,
-              current_deck_name: activeDeck.name,
-              current_deck_id: activeDeck.id,
-              card_start_time: new Date().toISOString(),
-              card_duration: randomDuration
-            })
-          );
+          console.log(`[${APP_VERSION}] Assigning random card "${selectedCard}" to ${player.name}, duration=${randomDuration}s`);
+          
+          try {
+            await safeOperation(() =>
+              room.collection('player').update(player.id, {
+                current_card: selectedCard,
+                current_deck_name: activeDeck.name,
+                current_deck_id: activeDeck.id,
+                card_start_time: new Date().toISOString(),
+                card_duration: randomDuration
+              })
+            );
+          } catch (err) {
+            console.error(`[${APP_VERSION}] Failed to update player ${player.name}:`, err);
+          }
         }
       }
 
@@ -445,7 +488,9 @@ function ConductorView({ onNavigate }) {
         })
       );
 
-      // Refresh player list after distribution
+      console.log(`[${APP_VERSION}] Card distribution complete`);
+
+      // Force refresh player list to show updated cards
       setTimeout(refreshPlayerList, 1000);
 
       setSuccess(`Cards distributed to ${players.length} players`);
@@ -466,14 +511,21 @@ function ConductorView({ onNavigate }) {
       setLoading(true);
       setError('');
 
+      console.log(`[${APP_VERSION}] Ending session ${sessionId} for ${players.length} players`);
+
       // Update all players with END signal
       for (const player of players) {
-        await safeOperation(() =>
-          room.collection('player').update(player.id, {
-            current_card: 'END',
-            card_start_time: new Date().toISOString()
-          })
-        );
+        try {
+          console.log(`[${APP_VERSION}] Sending END signal to ${player.name}`);
+          await safeOperation(() =>
+            room.collection('player').update(player.id, {
+              current_card: 'END',
+              card_start_time: new Date().toISOString()
+            })
+          );
+        } catch (err) {
+          console.error(`[${APP_VERSION}] Failed to send END to player ${player.name}:`, err);
+        }
       }
 
       // Mark session as ended
@@ -753,80 +805,86 @@ function ConductorView({ onNavigate }) {
         )}
 
         <h3 className="subheader">Distribution Controls</h3>
-        <div>
-          <label>Distribution Mode:</label>
-          <select
-            className="input"
-            value={distributionMode}
-            onChange={(e) => setDistributionMode(e.target.value)}
-          >
-            <option value="unison">Unison - All players get the same card</option>
-            <option value="unique">Unique - Each player gets a different card</option>
-            <option value="random">Random - Each player gets a random card</option>
-          </select>
-        </div>
-        <div>
-          <label>Timer Duration (random between min and max):</label>
-          <div style={{ display: 'flex', gap: '10px' }}>
-            <div style={{ flex: 1 }}>
-              <label>Minimum (seconds):</label>
-              <input
-                type="number"
-                className="input"
-                value={minTimerSeconds}
-                min="5"
-                max="300"
-                onChange={(e) => {
-                  const value = Math.max(5, parseInt(e.target.value) || 5);
-                  setMinTimerSeconds(value);
-                  if (value > maxTimerSeconds) {
+        <div className="distribution-container">
+          <div className="distribution-section">
+            <label>Distribution Mode:</label>
+            <select
+              className="input"
+              value={distributionMode}
+              onChange={(e) => setDistributionMode(e.target.value)}
+            >
+              <option value="unison">Unison - All players get the same card</option>
+              <option value="unique">Unique - Each player gets a different card</option>
+              <option value="random">Random - Each player gets a random card</option>
+            </select>
+          </div>
+          <div className="distribution-section">
+            <label>Timer Duration (random between min and max):</label>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <div style={{ flex: 1 }}>
+                <label>Minimum (seconds):</label>
+                <input
+                  type="number"
+                  className="input"
+                  value={minTimerSeconds}
+                  min="5"
+                  max="300"
+                  onChange={(e) => {
+                    const value = Math.max(5, parseInt(e.target.value) || 5);
+                    setMinTimerSeconds(value);
+                    if (value > maxTimerSeconds) {
+                      setMaxTimerSeconds(value);
+                    }
+                  }}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label>Maximum (seconds):</label>
+                <input
+                  type="number"
+                  className="input"
+                  value={maxTimerSeconds}
+                  min="5"
+                  max="300"
+                  onChange={(e) => {
+                    const value = Math.max(
+                      minTimerSeconds,
+                      parseInt(e.target.value) || minTimerSeconds
+                    );
                     setMaxTimerSeconds(value);
-                  }
-                }}
-              />
-            </div>
-            <div style={{ flex: 1 }}>
-              <label>Maximum (seconds):</label>
-              <input
-                type="number"
-                className="input"
-                value={maxTimerSeconds}
-                min="5"
-                max="300"
-                onChange={(e) => {
-                  const value = Math.max(
-                    minTimerSeconds,
-                    parseInt(e.target.value) || minTimerSeconds
-                  );
-                  setMaxTimerSeconds(value);
-                }}
-              />
+                  }}
+                />
+              </div>
             </div>
           </div>
+          <div className="distribution-section">
+            <label>Select Deck:</label>
+            <select
+              className="input"
+              value={selectedDeck}
+              onChange={(e) => setSelectedDeck(e.target.value)}
+            >
+              {decks.map(deck => (
+                <option key={deck.id} value={deck.id}>
+                  {deck.name} ({deck.card_count || deck.cards.length} cards)
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
-        <div>
-          <label>Select Deck:</label>
-          <select
-            className="input"
-            value={selectedDeck}
-            onChange={(e) => setSelectedDeck(e.target.value)}
-          >
-            {decks.map(deck => (
-              <option key={deck.id} value={deck.id}>
-                {deck.name} ({deck.card_count || deck.cards.length} cards)
-              </option>
-            ))}
-          </select>
+
+        <div className="next-card-notice">
+          <span className="emoji">👇</span> Click the button below to distribute cards to all players <span className="emoji">👇</span>
         </div>
 
         <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
           <button
-            className="btn"
+            className="btn btn-action"
             style={{ flex: 1 }}
             onClick={handleDistributeCards}
             disabled={loading}
           >
-            {loading ? 'Sending...' : 'Distribute Cards'}
+            {loading ? 'Sending...' : 'Distribute Cards Now'}
           </button>
           <button
             className="btn btn-outline"
@@ -847,6 +905,7 @@ function ConductorView({ onNavigate }) {
 
 function PlayerTimer({ startTime, duration }) {
   const [timeLeft, setTimeLeft] = useState(duration);
+  const [isExpired, setIsExpired] = useState(false);
 
   useEffect(() => {
     const start = new Date(startTime).getTime();
@@ -856,23 +915,27 @@ function PlayerTimer({ startTime, duration }) {
       const now = Date.now();
       const remaining = Math.max(0, Math.ceil((end - now) / 1000));
       setTimeLeft(remaining);
+      
+      if (remaining === 0 && !isExpired) {
+        setIsExpired(true);
+      }
     };
 
     updateTimer();
     const interval = setInterval(updateTimer, 1000);
 
     return () => clearInterval(interval);
-  }, [startTime, duration]);
+  }, [startTime, duration, isExpired]);
 
   const percentage = (timeLeft / duration) * 100;
 
   return (
     <div style={{ marginTop: '8px' }}>
-      <div className="timer-bar">
+      <div className={`timer-bar ${isExpired ? 'timer-expired' : ''}`}>
         <div className="timer-progress" style={{ width: `${percentage}%` }}></div>
       </div>
       <div style={{ fontSize: '12px', textAlign: 'right' }}>
-        {timeLeft} sec
+        {isExpired ? 'Time up!' : `${timeLeft} sec`}
       </div>
     </div>
   );
@@ -913,7 +976,7 @@ function JoinView({ onNavigate, initialPin }) {
       }
 
       // Create player record
-      await safeOperation(() =>
+      const player = await safeOperation(() =>
         room.collection('player').create({
           name,
           session_pin: pin,
@@ -922,12 +985,15 @@ function JoinView({ onNavigate, initialPin }) {
         })
       );
 
+      console.log(`[${APP_VERSION}] Player joined: ${name}, pin: ${pin}, id: ${player.id}`);
+
       // Save to localStorage for reconnection
       localStorage.setItem('playerName', name);
       localStorage.setItem('lastPin', pin);
+      localStorage.setItem('playerId', player.id);
 
       // Navigate to player view
-      onNavigate('player', { pin, name });
+      onNavigate('player', { pin, name, playerId: player.id });
     } catch (error) {
       setError('Failed to join session');
       console.error('Error joining session:', error);
@@ -985,11 +1051,13 @@ function JoinView({ onNavigate, initialPin }) {
   );
 }
 
-function PlayerView({ pin, name, onNavigate }) {
+function PlayerView({ pin, name, playerId, onNavigate }) {
   const [player, setPlayer] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [sessionEnded, setSessionEnded] = useState(false);
+  const [cardAnimating, setCardAnimating] = useState(false);
+  const lastCardRef = useRef('');
 
   // Find player and subscribe to updates
   useEffect(() => {
@@ -997,11 +1065,27 @@ function PlayerView({ pin, name, onNavigate }) {
 
     const findPlayer = async () => {
       try {
-        const players = await safeOperation(() =>
-          room.collection('player')
-            .filter({ name, session_pin: pin })
-            .getList()
-        );
+        console.log(`[${APP_VERSION}] Finding player: name=${name}, pin=${pin}, id=${playerId || 'unknown'}`);
+        
+        let players;
+        if (playerId) {
+          // If we have a player ID (from localStorage), use that first
+          const playerById = await safeOperation(() => 
+            room.collection('player').filter({ id: playerId }).getList()
+          );
+          if (playerById.length > 0) {
+            players = playerById;
+          }
+        }
+        
+        // Fallback to finding by name and pin
+        if (!players || players.length === 0) {
+          players = await safeOperation(() =>
+            room.collection('player')
+              .filter({ name, session_pin: pin })
+              .getList()
+          );
+        }
 
         if (players.length === 0) {
           setError('Player not found');
@@ -1009,6 +1093,7 @@ function PlayerView({ pin, name, onNavigate }) {
           return;
         }
 
+        console.log(`[${APP_VERSION}] Player found:`, players[0]);
         setPlayer(players[0]);
 
         if (players[0].current_card === 'END') {
@@ -1025,25 +1110,52 @@ function PlayerView({ pin, name, onNavigate }) {
 
     findPlayer();
 
-    // Subscribe to player updates
-    const unsubscribe = room.collection('player')
-      .filter({ name, session_pin: pin })
-      .subscribe(players => {
-        if (players.length > 0) {
-          setPlayer(players[0]);
+    // Subscribe to player updates - use player ID if available, otherwise use name and pin
+    let subscription;
+    try {
+      if (playerId) {
+        subscription = room.collection('player')
+          .filter({ id: playerId })
+          .subscribe(players => handlePlayerUpdate(players));
+        console.log(`[${APP_VERSION}] Subscribed to player updates by ID: ${playerId}`);
+      } else {
+        subscription = room.collection('player')
+          .filter({ name, session_pin: pin })
+          .subscribe(players => handlePlayerUpdate(players));
+        console.log(`[${APP_VERSION}] Subscribed to player updates by name/pin: ${name}/${pin}`);
+      }
+    } catch (err) {
+      console.error(`[${APP_VERSION}] Error setting up player subscription:`, err);
+      setError('Connection error. Please try rejoining.');
+    }
 
-          if (players[0].current_card === 'END') {
-            setSessionEnded(true);
-          }
+    // Handle player updates
+    function handlePlayerUpdate(players) {
+      if (players.length > 0) {
+        console.log(`[${APP_VERSION}] Player update received:`, players[0]);
+        
+        // Check if card changed
+        if (lastCardRef.current !== players[0].current_card && players[0].current_card) {
+          setCardAnimating(true);
+          setTimeout(() => setCardAnimating(false), 500);
         }
-      });
+        
+        lastCardRef.current = players[0].current_card;
+        setPlayer(players[0]);
+
+        if (players[0].current_card === 'END') {
+          setSessionEnded(true);
+        }
+      }
+    }
 
     return () => {
-      if (typeof unsubscribe === 'function') {
-        unsubscribe();
+      if (typeof subscription === 'function') {
+        subscription();
+        console.log(`[${APP_VERSION}] Player subscription cleared`);
       }
     };
-  }, [pin, name]);
+  }, [pin, name, playerId]);
 
   if (loading) {
     return (
@@ -1068,7 +1180,7 @@ function PlayerView({ pin, name, onNavigate }) {
 
   if (sessionEnded) {
     return (
-      <div className="full-card">
+      <div className="full-card session-ended">
         <h2 className="card-text">SESSION ENDED</h2>
         <p>Thank you for participating!</p>
         <button
@@ -1098,9 +1210,14 @@ function PlayerView({ pin, name, onNavigate }) {
   if (!player.current_card) {
     return (
       <div className="full-card">
-        <h3>Waiting for instructions...</h3>
+        <h3>Waiting for card...</h3>
+        <div className="waiting-animation">
+          <div className="dot"></div>
+          <div className="dot"></div>
+          <div className="dot"></div>
+        </div>
         <p style={{ margin: '15px 0' }}>
-          The conductor will distribute cards shortly.
+          The conductor will distribute a card shortly.
         </p>
         <div style={{ fontStyle: 'italic', marginTop: '20px' }}>
           Connected as: {name}
@@ -1112,14 +1229,16 @@ function PlayerView({ pin, name, onNavigate }) {
   // Show the active card
   return (
     <div className="full-card">
-      <h2 className="card-text">{player.current_card}</h2>
+      <div className={`card-content ${cardAnimating ? 'card-new' : ''}`}>
+        <h2 className="card-text">{player.current_card}</h2>
 
-      {player.card_start_time && player.card_duration && (
-        <PlayerTimer
-          startTime={player.card_start_time}
-          duration={player.card_duration}
-        />
-      )}
+        {player.card_start_time && player.card_duration && (
+          <PlayerTimer
+            startTime={player.card_start_time}
+            duration={player.card_duration}
+          />
+        )}
+      </div>
 
       <div
         style={{
@@ -1136,7 +1255,7 @@ function PlayerView({ pin, name, onNavigate }) {
 
 function App() {
   const [view, setView] = useState('home');
-  const [playerData, setPlayerData] = useState({ pin: '', name: '' });
+  const [playerData, setPlayerData] = useState({ pin: '', name: '', playerId: localStorage.getItem('playerId') || '' });
 
   useEffect(() => {
     // Hide loading indicator
@@ -1161,7 +1280,11 @@ function App() {
 
   const handleNavigate = (to, data = {}) => {
     if (to === 'player' && data.pin && data.name) {
-      setPlayerData({ pin: data.pin, name: data.name });
+      setPlayerData({ 
+        pin: data.pin, 
+        name: data.name,
+        playerId: data.playerId || playerData.playerId
+      });
     }
     setView(to);
   };
@@ -1175,7 +1298,12 @@ function App() {
       case 'join':
         return <JoinView onNavigate={handleNavigate} initialPin={playerData.pin} />;
       case 'player':
-        return <PlayerView pin={playerData.pin} name={playerData.name} onNavigate={handleNavigate} />;
+        return <PlayerView 
+          pin={playerData.pin} 
+          name={playerData.name}
+          playerId={playerData.playerId}
+          onNavigate={handleNavigate} 
+        />;
       default:
         return <HomeView onNavigate={handleNavigate} />;
     }
