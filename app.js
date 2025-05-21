@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.4.0 (build 256)";
+const APP_VERSION = "2.4.1 (build 257)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -439,12 +439,22 @@ function ConductorView({ onNavigate }) {
   // Distribute cards to a single player
   const distributeCardToPlayer = async (player) => {
     if (!sessionId || !selectedDeck) {
-      console.log("[${APP_VERSION}] Cannot distribute: missing session or deck");
+      console.log(`[${APP_VERSION}] Cannot distribute: missing session or deck`);
       return false;
     }
 
     try {
       console.log(`[${APP_VERSION}] Distributing new card to player: ${player.name}`);
+      
+      // First, clear current card to indicate loading state to the player
+      await safeOperation(() =>
+        room.collection('player').update(player.id, {
+          current_card: '', // This will trigger loading state on player's side
+        })
+      );
+      
+      // Wait a short time to ensure player enters loading state
+      await new Promise(resolve => setTimeout(resolve, 300));
       
       // Get selected deck info
       let selectedDeckData = decks.find(d => d.id === selectedDeck);
@@ -1168,6 +1178,18 @@ function ConductorView({ onNavigate }) {
 function PlayerTimer({ startTime, duration }) {
   const [timeLeft, setTimeLeft] = useState(duration);
   const [isExpired, setIsExpired] = useState(false);
+  const timerStartTime = useRef(new Date(startTime).getTime());
+  const timerDuration = useRef(duration);
+
+  // Reset expired state when startTime or duration changes
+  useEffect(() => {
+    const newStartTime = new Date(startTime).getTime();
+    if (newStartTime !== timerStartTime.current || duration !== timerDuration.current) {
+      timerStartTime.current = newStartTime;
+      timerDuration.current = duration;
+      setIsExpired(false);
+    }
+  }, [startTime, duration]);
 
   useEffect(() => {
     const start = new Date(startTime).getTime();
@@ -1325,6 +1347,11 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
   // Debug state to show connection status
   const [connectionStatus, setConnectionStatus] = useState('Connecting...');
 
+  // Track when a card is received
+  const [cardReceived, setCardReceived] = useState(true); 
+  const [clientStartTime, setClientStartTime] = useState(null); 
+  const [clientDuration, setClientDuration] = useState(null); 
+  
   // Find player and subscribe to updates
   useEffect(() => {
     if (!pin || !name) return;
@@ -1470,6 +1497,28 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     );
   };
 
+  // Update when a new card is received
+  useEffect(() => {
+    if (player && player.current_card && player.current_card !== 'END') {
+      // Check if this is a new card (different from the last one we saw)
+      if (lastCardRef.current !== player.current_card) {
+        console.log(`[${APP_VERSION}] New card received: "${player.current_card}"`);
+        setCardReceived(true);
+        setCardAnimating(true);
+        
+        // Set client-side timer information
+        setClientStartTime(new Date().toISOString());
+        setClientDuration(player.card_duration);
+        
+        setTimeout(() => setCardAnimating(false), 500);
+        lastCardRef.current = player.current_card;
+      }
+    } else if (player && !player.current_card) {
+      // No current card, waiting for one
+      setCardReceived(false);
+    }
+  }, [player]);
+
   if (loading) {
     return (
       <div className="full-card">
@@ -1551,12 +1600,17 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       <div className={`card-content ${cardAnimating ? 'card-new' : ''}`}>
         <h2 className="card-text">{player.current_card}</h2>
 
-        {player.card_start_time && player.card_duration && (
+        {clientStartTime && clientDuration ? (
+          <PlayerTimer
+            startTime={clientStartTime}
+            duration={clientDuration}
+          />
+        ) : player.card_start_time && player.card_duration ? (
           <PlayerTimer
             startTime={player.card_start_time}
             duration={player.card_duration}
           />
-        )}
+        ) : null}
       </div>
 
       <div
