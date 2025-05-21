@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.13.0 (build 318)";
+const APP_VERSION = "2.14.0 (build 319)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -1270,6 +1270,14 @@ function JoinView({ onNavigate, initialPin = '' }) {
   const [validating, setValidating] = useState(false);
   const [session, setSession] = useState(null);
 
+  // Auto-validate pin when provided in URL
+  useEffect(() => {
+    // If we have an initialPin from the URL, validate it automatically
+    if (initialPin && !session && !validating && !loading) {
+      validateSession();
+    }
+  }, [initialPin]);
+
   // Validate session PIN
   const validateSession = async () => {
     if (!pin.trim()) {
@@ -1308,6 +1316,7 @@ function JoinView({ onNavigate, initialPin = '' }) {
       
       setSession(activeSession);
       setValidating(false);
+      setLoading(false);
       console.log(`[${APP_VERSION}] Session validated:`, activeSession);
       return true;
     } catch (error) {
