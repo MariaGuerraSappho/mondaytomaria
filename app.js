@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.4.2 (build 258)";
+const APP_VERSION = "2.4.3 (build 259)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -1228,7 +1228,7 @@ function PlayerTimer({ startTime, duration }) {
     };
   }, [startTime, duration, isExpired]);
 
-  const percentage = Math.min(100, Math.max(0, (timeLeft / duration) * 100));
+  const percentage = Math.min(100, Math.max(0, (timeLeft / timerDuration.current) * 100));
 
   return (
     <div style={{ marginTop: '8px' }}>
@@ -1384,6 +1384,85 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     return (now - startTime) >= duration;
   }, [player]);
   
+  // Player subscription 
+  useEffect(() => {
+    if (!playerId) {
+      console.error(`[${APP_VERSION}] No player ID provided`);
+      setError('No player identification found. Please rejoin the session.');
+      setLoading(false);
+      return;
+    }
+    
+    console.log(`[${APP_VERSION}] Setting up player subscription for ID: ${playerId}`);
+    setConnectionStatus('Connecting to server...');
+    
+    // Attempt to fetch player data immediately
+    const fetchInitialPlayerData = async () => {
+      try {
+        const playerData = await safeOperation(() => 
+          room.collection('player').filter({ id: playerId }).getList()
+        );
+        
+        if (playerData && playerData.length > 0) {
+          console.log(`[${APP_VERSION}] Initial player data loaded:`, playerData[0]);
+          setPlayer(playerData[0]);
+          setConnectionStatus('Connected');
+        } else {
+          console.error(`[${APP_VERSION}] Player not found with ID: ${playerId}`);
+          setError('Player not found. You may need to rejoin the session.');
+        }
+        setLoading(false);
+      } catch (err) {
+        console.error(`[${APP_VERSION}] Error fetching initial player data:`, err);
+        setConnectionStatus('Connection error. Retrying...');
+        setTimeout(fetchInitialPlayerData, 2000); // Retry after 2 seconds
+      }
+    };
+    
+    fetchInitialPlayerData();
+    
+    // Set up subscription for real-time updates
+    try {
+      if (playerSubscriptionRef.current) {
+        playerSubscriptionRef.current(); // Clear previous subscription
+      }
+      
+      const unsubscribe = room.collection('player')
+        .filter({ id: playerId })
+        .subscribe((players) => {
+          if (players && players.length > 0) {
+            const updatedPlayer = players[0];
+            console.log(`[${APP_VERSION}] Player data updated:`, updatedPlayer);
+            setPlayer(updatedPlayer);
+            setConnectionStatus('Connected');
+            setLoading(false);
+            
+            // Check for session end
+            if (updatedPlayer.current_card === 'END') {
+              setSessionEnded(true);
+            }
+          } else {
+            console.log(`[${APP_VERSION}] No player data in subscription update`);
+          }
+        });
+      
+      playerSubscriptionRef.current = unsubscribe;
+      console.log(`[${APP_VERSION}] Player subscription set up successfully`);
+    } catch (err) {
+      console.error(`[${APP_VERSION}] Error setting up player subscription:`, err);
+      setConnectionStatus('Subscription error');
+      setError('Error connecting to session. Please refresh the page.');
+      setLoading(false);
+    }
+    
+    return () => {
+      if (playerSubscriptionRef.current) {
+        playerSubscriptionRef.current();
+        playerSubscriptionRef.current = null;
+      }
+    };
+  }, [playerId]);
+  
   // Update timer expiry status
   useEffect(() => {
     if (!player || !player.current_card || player.current_card === 'END') {
@@ -1443,7 +1522,63 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     }
   }, [player]);
 
-  // Render waiting state (between cards or initially)
+  if (loading) {
+    return (
+      <div className="full-card">
+        <h3>Connecting...</h3>
+        <div className="waiting-animation">
+          <div className="dot"></div>
+          <div className="dot"></div>
+          <div className="dot"></div>
+        </div>
+        <p style={{ margin: '15px 0' }}>
+          {connectionStatus}
+        </p>
+      </div>
+    );
+  }
+  
+  if (error) {
+    return (
+      <div className="full-card">
+        <h3>Error</h3>
+        <p style={{ margin: '15px 0', color: 'var(--error)' }}>
+          {error}
+        </p>
+        <button className="btn" onClick={() => window.location.reload()}>
+          Reload Page
+        </button>
+      </div>
+    );
+  }
+  
+  if (!player) {
+    return (
+      <div className="full-card">
+        <h3>Connecting to session...</h3>
+        <div className="waiting-animation">
+          <div className="dot"></div>
+          <div className="dot"></div>
+          <div className="dot"></div>
+        </div>
+      </div>
+    );
+  }
+  
+  if (sessionEnded || player.current_card === 'END') {
+    return (
+      <div className="full-card session-ended">
+        <h2 className="card-text">Session Ended</h2>
+        <p style={{ margin: '15px 0' }}>
+          Thank you for participating!
+        </p>
+        <button className="btn" onClick={() => onNavigate('home')}>
+          Return to Home
+        </button>
+      </div>
+    );
+  }
+
   const renderWaitingState = () => (
     <div className="full-card">
       <h3>Waiting for next card...</h3>
@@ -1461,13 +1596,10 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     </div>
   );
 
-  // Show the active card or waiting state
-  // If timer is expired, show waiting state instead of expired card
   if (!player.current_card || isTimerExpired) {
     return renderWaitingState();
   }
 
-  // Show the active card (only if not expired)
   return (
     <div className="full-card">
       <div className={`card-content ${cardAnimating ? 'card-new' : ''}`}>
@@ -1496,7 +1628,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         Connected as: {name}
       </div>
       
-      {/* Small debug button in corner for connection issues */}
       <button 
         onClick={() => window.location.reload()} 
         style={{ 
@@ -1522,13 +1653,11 @@ function App() {
   const [playerData, setPlayerData] = useState({ pin: '', name: '', playerId: localStorage.getItem('playerId') || '' });
 
   useEffect(() => {
-    // Hide loading indicator
     const loadingElement = document.getElementById('loading');
     if (loadingElement) {
       loadingElement.style.display = 'none';
     }
 
-    // Check URL for PIN parameter
     try {
       const params = new URLSearchParams(window.location.search);
       const pinParam = params.get('pin');
@@ -1581,7 +1710,6 @@ function App() {
   );
 }
 
-// Render the app
 try {
   const root = createRoot(document.getElementById('root'));
   root.render(<App />);
