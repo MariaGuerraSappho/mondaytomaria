@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.7.0 (build 302)";
+const APP_VERSION = "2.8.0 (build 309)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -637,27 +637,29 @@ function ConductorView({ onNavigate }) {
           distribution_pending: true, // Flag to indicate distribution is in progress
           distribution_attempt: (player.distribution_attempt || 0) + 1,
           last_distribution_attempt: new Date().toISOString(),
-          distribution_id: distributionId // Add a unique ID for this distribution
+          distribution_id: distributionId, // Add a unique ID for this distribution
+          pending_card: selectedCard,
+          pending_deck_name: selectedDeckName,
+          pending_deck_id: selectedDeckId,
+          pending_duration: randomDuration,
+          timer_sync_required: true
         })
       );
-      
-      // Use current time as the start time to ensure timer starts fresh
-      const currentTime = new Date().toISOString();
       
       // Small delay to ensure client sees the cleared state
       await new Promise(resolve => setTimeout(resolve, 300));
       
-      // Update the player with their new card and a fresh timestamp
+      // Update the player with their new card but don't set the start time yet
+      // The player will update this with the actual receipt time
       const updateResult = await safeOperation(() =>
         room.collection('player').update(player.id, {
           current_card: selectedCard,
           current_deck_name: selectedDeckName,
           current_deck_id: selectedDeckId,
-          card_start_time: currentTime,
           card_duration: randomDuration,
           distribution_pending: false,
-          distribution_id: distributionId, // Include the distribution ID
-          last_successful_distribution: currentTime,
+          distribution_id: distributionId,
+          needs_sync: true,
           ready_for_card: false // Reset ready_for_card flag
         })
       );
@@ -673,11 +675,10 @@ function ConductorView({ onNavigate }) {
               current_card: selectedCard,
               current_deck_name: selectedDeckName,
               current_deck_id: selectedDeckId,
-              card_start_time: currentTime,
               card_duration: randomDuration,
               distribution_pending: false,
               distribution_id: distributionId,
-              last_successful_distribution: currentTime,
+              needs_sync: true,
               ready_for_card: false
             };
           }
@@ -1247,7 +1248,7 @@ function ConductorView({ onNavigate }) {
   );
 }
 
-function PlayerTimer({ startTime, duration }) {
+function PlayerTimer({ startTime, duration, syncRequired }) {
   const [timeLeft, setTimeLeft] = useState(duration);
   const [isExpired, setIsExpired] = useState(false);
   const [percentage, setPercentage] = useState(100);
@@ -1258,7 +1259,7 @@ function PlayerTimer({ startTime, duration }) {
   const durationRef = useRef(duration);
   
   useEffect(() => {
-    console.log(`[${APP_VERSION}] PlayerTimer mounted with duration=${duration}s, startTime=${startTime}`);
+    console.log(`[${APP_VERSION}] PlayerTimer mounted with duration=${duration}s, startTime=${startTime}, syncRequired=${syncRequired}`);
     
     // Update refs with new values
     startTimeRef.current = new Date(startTime).getTime();
@@ -1308,7 +1309,7 @@ function PlayerTimer({ startTime, duration }) {
         timerIntervalRef.current = null;
       }
     };
-  }, [startTime, duration]);
+  }, [startTime, duration, syncRequired]);
 
   return (
     <div style={{ marginTop: '8px' }}>
@@ -1637,18 +1638,24 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       setCardAnimating(true);
       setIsTimerExpired(false);
       
-      setClientStartTime(new Date().toISOString());
+      // Set client-side start time to NOW, not when the server sent it
+      const clientReceivedTime = new Date().toISOString();
+      setClientStartTime(clientReceivedTime);
       setClientDuration(updatedPlayer.card_duration);
       
+      // Update the server with the actual receipt time to keep conductor in sync
       try {
         safeOperation(() => 
           room.collection('player').update(updatedPlayer.id, {
             card_received: true,
-            card_received_at: new Date().toISOString(),
-            distribution_id_received: updatedPlayer.distribution_id
+            card_received_at: clientReceivedTime,
+            card_start_time: clientReceivedTime, // Update the actual start time
+            distribution_id_received: updatedPlayer.distribution_id,
+            needs_sync: false,
+            timer_sync_required: false
           })
         );
-        console.log(`[${APP_VERSION}] Acknowledged card receipt to server`);
+        console.log(`[${APP_VERSION}] Acknowledged card receipt to server with start time: ${clientReceivedTime}`);
       } catch (e) {
         console.error(`[${APP_VERSION}] Failed to acknowledge card receipt:`, e);
       }
@@ -1897,12 +1904,14 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             key={`${clientStartTime}-${clientDuration}`} // Key forces recreation of timer
             startTime={clientStartTime}
             duration={clientDuration}
+            syncRequired={false} // This is a client-side timer, already synced
           />
         ) : player.card_start_time && player.card_duration ? (
           <PlayerTimer
             key={`${player.card_start_time}-${player.card_duration}`}
             startTime={player.card_start_time}
             duration={player.card_duration}
+            syncRequired={player.timer_sync_required}
           />
         ) : null}
       </div>
