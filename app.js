@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.12.0 (build 317)";
+const APP_VERSION = "2.13.0 (build 318)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -1262,11 +1262,539 @@ function ConductorView({ onNavigate }) {
   );
 }
 
-function PlayerView({ pin, name, playerId, onNavigate }) {
-  // ... rest of the code remains unchanged ...
+function JoinView({ onNavigate, initialPin = '' }) {
+  const [pin, setPin] = useState(initialPin);
+  const [name, setName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [validating, setValidating] = useState(false);
+  const [session, setSession] = useState(null);
+
+  // Validate session PIN
+  const validateSession = async () => {
+    if (!pin.trim()) {
+      setError('Please enter a PIN');
+      return false;
+    }
+
+    setLoading(true);
+    setValidating(true);
+    setError('');
+
+    try {
+      console.log(`[${APP_VERSION}] Validating session PIN: ${pin}`);
+      
+      const sessions = await safeOperation(() => 
+        room.collection('session')
+          .filter({ pin: pin.trim() })
+          .getList()
+      );
+      
+      if (sessions.length === 0) {
+        setError('No active session found with this PIN');
+        setLoading(false);
+        setValidating(false);
+        return false;
+      }
+      
+      const activeSession = sessions[0];
+      
+      if (activeSession.ended) {
+        setError('This session has ended');
+        setLoading(false);
+        setValidating(false);
+        return false;
+      }
+      
+      setSession(activeSession);
+      setValidating(false);
+      console.log(`[${APP_VERSION}] Session validated:`, activeSession);
+      return true;
+    } catch (error) {
+      console.error(`[${APP_VERSION}] Session validation error:`, error);
+      setError('Error validating session. Please try again.');
+      setLoading(false);
+      setValidating(false);
+      return false;
+    }
+  };
+
+  // Handle form submission
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    if (!name.trim()) {
+      setError('Please enter your name');
+      return;
+    }
+    
+    if (loading) return;
+    
+    // Validate the session first if we haven't already
+    if (!session && !validating) {
+      const valid = await validateSession();
+      if (!valid) return;
+    }
+    
+    try {
+      console.log(`[${APP_VERSION}] Joining session as: ${name}`);
+      setLoading(true);
+      setError('');
+      
+      // Check if player has an existing ID in this session
+      const existingPlayers = await safeOperation(() => 
+        room.collection('player')
+          .filter({ session_pin: pin.trim(), name: name.trim() })
+          .getList()
+      );
+      
+      let playerId = '';
+      
+      if (existingPlayers.length > 0) {
+        // Reuse existing player record
+        playerId = existingPlayers[0].id;
+        await safeOperation(() => 
+          room.collection('player').update(playerId, {
+            active: true,
+            last_seen: new Date().toISOString(),
+            rejoined: true
+          })
+        );
+        console.log(`[${APP_VERSION}] Rejoining as existing player: ${playerId}`);
+      } else {
+        // Create new player
+        const player = await safeOperation(() => 
+          room.collection('player').create({
+            name: name.trim(),
+            session_pin: pin.trim(),
+            active: true,
+            last_seen: new Date().toISOString(),
+            current_card: null,
+            card_start_time: null,
+            ready_for_card: true
+          })
+        );
+        playerId = player.id;
+        console.log(`[${APP_VERSION}] Created new player: ${playerId}`);
+      }
+      
+      // Save player ID to local storage
+      localStorage.setItem('playerId', playerId);
+      
+      // Navigate to player view
+      onNavigate('player', { pin: pin.trim(), name: name.trim(), playerId });
+    } catch (error) {
+      console.error(`[${APP_VERSION}] Error joining session:`, error);
+      setError('Error joining session. Please try again.');
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="container">
+      <div className="full-card">
+        <h2 className="header">Join Session</h2>
+        
+        <form onSubmit={handleSubmit}>
+          <input
+            type="text"
+            className="input"
+            placeholder="Session PIN"
+            value={pin}
+            onChange={(e) => setPin(e.target.value)}
+            disabled={loading || validating || session}
+          />
+          
+          {(session || validating) && (
+            <input
+              type="text"
+              className="input"
+              placeholder="Your Name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={loading}
+            />
+          )}
+          
+          {error && <div className="error">{error}</div>}
+          
+          {!session && !validating && (
+            <button 
+              type="button" 
+              className="btn btn-block" 
+              onClick={validateSession}
+              disabled={loading || !pin.trim()}
+            >
+              {loading ? 'Checking...' : 'Next'}
+            </button>
+          )}
+          
+          {(session || validating) && (
+            <button 
+              type="submit" 
+              className="btn btn-block" 
+              disabled={loading || validating || !name.trim()}
+            >
+              {loading ? 'Joining...' : 'Join Session'}
+            </button>
+          )}
+        </form>
+        
+        <button
+          className="btn btn-outline btn-block"
+          onClick={() => onNavigate('home')}
+          style={{ marginTop: '15px' }}
+          disabled={loading}
+        >
+          Back
+        </button>
+      </div>
+    </div>
+  );
 }
 
-// ... rest of the components and code ...
+function PlayerView({ pin, name, playerId, onNavigate }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [session, setSession] = useState(null);
+  const [card, setCard] = useState(null);
+  const [timeLeft, setTimeLeft] = useState(0);
+  const [timerStarted, setTimerStarted] = useState(false);
+  const [waitingForCard, setWaitingForCard] = useState(true);
+  const timerRef = useRef(null);
+  const playerRef = useRef(null);
+  const cardReceivedRef = useRef(false);
+  const acknowledgedDistributionIdRef = useRef(null);
+  const playerUpdateIntervalRef = useRef(null);
+  
+  const CARD_RECEIVED_CHECK_INTERVAL = 250; // ms
+  const cardReceivedCheckerRef = useRef(null);
+  const waitingAcknowledgedRef = useRef(false);
+  
+  // Function to update player's ready status
+  const updatePlayerStatus = async (statusUpdate) => {
+    if (!playerId) return;
+    
+    try {
+      await safeOperation(() => 
+        room.collection('player').update(playerId, {
+          ...statusUpdate,
+          last_seen: new Date().toISOString()
+        })
+      );
+    } catch (error) {
+      console.error(`[${APP_VERSION}] Error updating player status:`, error);
+    }
+  };
+  
+  // Initialize player view
+  useEffect(() => {
+    const initPlayerView = async () => {
+      if (!pin || !playerId) {
+        setError('Invalid session data');
+        setLoading(false);
+        return;
+      }
+      
+      try {
+        console.log(`[${APP_VERSION}] Initializing player view for player ${name} (${playerId})`);
+        
+        // Get session data
+        const sessions = await safeOperation(() => 
+          room.collection('session')
+            .filter({ pin })
+            .getList()
+        );
+        
+        if (sessions.length === 0) {
+          setError('Session not found');
+          setLoading(false);
+          return;
+        }
+        
+        const sessionData = sessions[0];
+        
+        if (sessionData.ended) {
+          setError('This session has ended');
+          setLoading(false);
+          return;
+        }
+        
+        setSession(sessionData);
+        
+        // Check if player exists
+        const players = await safeOperation(() => 
+          room.collection('player')
+            .filter({ id: playerId })
+            .getList()
+        );
+        
+        if (players.length === 0) {
+          setError('Player not found. Please rejoin the session.');
+          setLoading(false);
+          return;
+        }
+        
+        const playerData = players[0];
+        playerRef.current = playerData;
+        
+        // Check if player already has a card
+        if (playerData.current_card && playerData.current_card !== 'END') {
+          console.log(`[${APP_VERSION}] Player already has card: ${playerData.current_card}`);
+          
+          setCard({
+            text: playerData.current_card,
+            deckName: playerData.current_deck_name || 'Unknown',
+            startTime: playerData.card_start_time ? new Date(playerData.card_start_time) : new Date(),
+            duration: playerData.card_duration || 30
+          });
+          
+          setWaitingForCard(false);
+          
+          // Calculate time left
+          if (playerData.card_start_time && playerData.card_duration) {
+            const startTime = new Date(playerData.card_start_time).getTime();
+            const endTime = startTime + (playerData.card_duration * 1000);
+            const now = Date.now();
+            const remaining = Math.max(0, endTime - now);
+            setTimeLeft(Math.ceil(remaining / 1000));
+          }
+        } else if (playerData.current_card === 'END') {
+          setCard({ text: 'Session Ended', isEnd: true });
+          setWaitingForCard(false);
+        } else {
+          setWaitingForCard(true);
+          setCard(null);
+          
+          // Mark player as ready for a card
+          await updatePlayerStatus({
+            ready_for_card: true,
+            waiting_for_player_ack: false,
+            card_received: false
+          });
+        }
+        
+        // Set up subscription for player updates
+        const unsubscribe = room.collection('player')
+          .filter({ id: playerId })
+          .subscribe(updatedPlayers => {
+            if (updatedPlayers.length === 0) return;
+            
+            const updatedPlayer = updatedPlayers[0];
+            playerRef.current = updatedPlayer;
+            
+            // Handle new card
+            if (updatedPlayer.current_card && 
+                updatedPlayer.current_card !== 'END' && 
+                (!card || card.text !== updatedPlayer.current_card || 
+                 acknowledgedDistributionIdRef.current !== updatedPlayer.distribution_id)) {
+              
+              console.log(`[${APP_VERSION}] New card received: ${updatedPlayer.current_card}`);
+              
+              const newCard = {
+                text: updatedPlayer.current_card,
+                deckName: updatedPlayer.current_deck_name || 'Unknown',
+                startTime: new Date(),
+                duration: updatedPlayer.card_duration || 30,
+                distributionId: updatedPlayer.distribution_id
+              };
+              
+              // Acknowledge card receipt
+              acknowledgedDistributionIdRef.current = updatedPlayer.distribution_id;
+              cardReceivedRef.current = true;
+              
+              // Update server that we've received the card
+              updatePlayerStatus({
+                waiting_for_player_ack: false,
+                card_received: true,
+                card_start_time: new Date().toISOString(),
+                ready_for_card: false
+              });
+              
+              // Start a new timer for this card
+              if (timerRef.current) {
+                clearInterval(timerRef.current);
+              }
+              
+              setCard(newCard);
+              setTimeLeft(newCard.duration);
+              setWaitingForCard(false);
+              setTimerStarted(true);
+              
+              timerRef.current = setInterval(() => {
+                setTimeLeft(prevTime => {
+                  if (prevTime <= 1) {
+                    clearInterval(timerRef.current);
+                    setTimerStarted(false);
+                    
+                    // Mark as ready for next card
+                    setTimeout(() => {
+                      updatePlayerStatus({
+                        ready_for_card: true
+                      });
+                      setWaitingForCard(true);
+                    }, 500);
+                    
+                    return 0;
+                  }
+                  return prevTime - 1;
+                });
+              }, 1000);
+            }
+            
+            // Handle session end signal
+            else if (updatedPlayer.current_card === 'END') {
+              if (timerRef.current) {
+                clearInterval(timerRef.current);
+              }
+              
+              setCard({ text: 'Session Ended', isEnd: true });
+              setWaitingForCard(false);
+              setTimerStarted(false);
+            }
+          });
+        
+        // Start a heartbeat interval to update our presence
+        playerUpdateIntervalRef.current = setInterval(() => {
+          updatePlayerStatus({ ping: Date.now() });
+        }, 10000);
+        
+        setLoading(false);
+      } catch (error) {
+        console.error(`[${APP_VERSION}] Error initializing player view:`, error);
+        setError('Error connecting to session. Please try again.');
+        setLoading(false);
+      }
+    };
+    
+    initPlayerView();
+    
+    // Set up a checker to make sure we acknowledge cards quickly
+    cardReceivedCheckerRef.current = setInterval(() => {
+      const player = playerRef.current;
+      
+      if (player && player.waiting_for_player_ack && !waitingAcknowledgedRef.current) {
+        console.log(`[${APP_VERSION}] Acknowledging waiting card`);
+        waitingAcknowledgedRef.current = true;
+        
+        updatePlayerStatus({
+          waiting_for_player_ack: false,
+          card_received: true,
+          card_start_time: new Date().toISOString(),
+          ready_for_card: false
+        });
+        
+        // This should trigger the subscription to update the UI
+      }
+    }, CARD_RECEIVED_CHECK_INTERVAL);
+    
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+      
+      if (playerUpdateIntervalRef.current) {
+        clearInterval(playerUpdateIntervalRef.current);
+      }
+      
+      if (cardReceivedCheckerRef.current) {
+        clearInterval(cardReceivedCheckerRef.current);
+      }
+    };
+  }, [pin, name, playerId]);
+  
+  return (
+    <div className="container">
+      <div className={`card ${card && card.isEnd ? 'session-ended' : ''}`}>
+        <h2 className="header">
+          {loading ? 'Connecting...' : name}
+        </h2>
+        
+        {loading && (
+          <div className="waiting-animation">
+            <div className="dot"></div>
+            <div className="dot"></div>
+            <div className="dot"></div>
+          </div>
+        )}
+        
+        {error && (
+          <div className="error">{error}</div>
+        )}
+        
+        {!loading && !error && (
+          <>
+            {waitingForCard ? (
+              <div className="card-content">
+                <div className="next-card-notice">
+                  <span className="emoji">⏳</span> Waiting for next card...
+                  <br />
+                  The conductor will distribute a card shortly.
+                </div>
+                
+                <div className="waiting-animation">
+                  <div className="dot"></div>
+                  <div className="dot"></div>
+                  <div className="dot"></div>
+                </div>
+              </div>
+            ) : (
+              <div className={`card-content ${card !== null ? 'card-new' : ''}`}>
+                {card && (
+                  <>
+                    <div className="card-text">
+                      {card.text}
+                    </div>
+                    
+                    {!card.isEnd && (
+                      <>
+                        <div style={{ textAlign: 'center', margin: '10px 0', color: 'var(--text-light)' }}>
+                          {card.deckName}
+                        </div>
+                        
+                        <div className="timer-bar">
+                          <div 
+                            className={`timer-progress ${timeLeft === 0 ? 'timer-expired' : ''}`}
+                            style={{ width: `${(timeLeft / card.duration) * 100}%` }}
+                          ></div>
+                        </div>
+                        
+                        <div style={{ textAlign: 'center', fontSize: '18px', fontWeight: 'bold' }}>
+                          {timeLeft} seconds
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </>
+        )}
+        
+        <button
+          className="btn btn-outline btn-block"
+          onClick={() => {
+            if (timerRef.current) {
+              clearInterval(timerRef.current);
+            }
+            
+            if (playerId) {
+              updatePlayerStatus({
+                active: false,
+                left_at: new Date().toISOString()
+              });
+            }
+            
+            onNavigate('home');
+          }}
+          style={{ marginTop: '20px' }}
+        >
+          Leave Session
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function App() {
   const [view, setView] = useState('home');
