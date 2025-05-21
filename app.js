@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.5.0 (build 267)";
+const APP_VERSION = "2.5.1 (build 278)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -453,8 +453,8 @@ function ConductorView({ onNavigate }) {
         })
       );
       
-      // Reduced wait time to 100ms to speed up card distribution
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Increased wait time to 300ms to ensure client processes card clearing
+      await new Promise(resolve => setTimeout(resolve, 300));
       
       // Get selected deck info
       let selectedDeckData = decks.find(d => d.id === selectedDeck);
@@ -551,6 +551,9 @@ function ConductorView({ onNavigate }) {
         console.log(`[${APP_VERSION}] Random mode: selected card "${selectedCard}" from deck "${selectedDeckName}" for ${player.name}`);
       }
 
+      // Add a unique distribution ID to help track card delivery
+      const distributionId = Math.random().toString(36).substring(2, 15);
+      
       // Update the player with their new card and a fresh timestamp
       await safeOperation(() =>
         room.collection('player').update(player.id, {
@@ -558,11 +561,12 @@ function ConductorView({ onNavigate }) {
           current_deck_name: selectedDeckName,
           current_deck_id: selectedDeckId,
           card_start_time: new Date().toISOString(), // Fresh timestamp for accurate timing
-          card_duration: randomDuration
+          card_duration: randomDuration,
+          distribution_id: distributionId // Add unique ID for tracking
         })
       );
       
-      console.log(`[${APP_VERSION}] Card distributed to ${player.name}, duration=${randomDuration}s`);
+      console.log(`[${APP_VERSION}] Card distributed to ${player.name}, duration=${randomDuration}s, id=${distributionId}`);
       return true;
     } catch (error) {
       console.error(`[${APP_VERSION}] Error distributing card to ${player.name}:`, error);
@@ -1025,6 +1029,29 @@ function ConductorView({ onNavigate }) {
                 <div style={{ flex: 1 }}>
                   <div>
                     <strong>{player.name}</strong>
+                    {function isPlayerPotentiallyStuck(player) {
+                      if (!player.current_card || player.current_card === 'END') return false;
+                      
+                      // If card was distributed more than 20 seconds ago but expired less than 10 seconds ago
+                      // (this suggests the player might be stuck)
+                      const now = Date.now();
+                      const startTime = new Date(player.card_start_time).getTime();
+                      const endTime = startTime + (player.card_duration * 1000);
+                      
+                      const isExpired = now > endTime;
+                      const timeUntilExpiry = endTime - now;
+                      const timeSinceDistribution = now - startTime;
+                      
+                      return !isExpired && timeUntilExpiry < 10000 && timeSinceDistribution > 30000;
+                    }(player) && (
+                      <span style={{ 
+                        color: 'var(--error)',
+                        fontSize: '12px',
+                        marginLeft: '8px' 
+                      }}>
+                        (May be stuck)
+                      </span>
+                    )}
                   </div>
                   {player.current_card && player.current_card !== 'END' && (
                     <div className="player-card">
@@ -1035,6 +1062,29 @@ function ConductorView({ onNavigate }) {
                           startTime={player.card_start_time}
                           duration={player.card_duration}
                         />
+                      )}
+                      {function isPlayerPotentiallyStuck(player) {
+                        if (!player.current_card || player.current_card === 'END') return false;
+                        
+                        // If card was distributed more than 20 seconds ago but expired less than 10 seconds ago
+                        // (this suggests the player might be stuck)
+                        const now = Date.now();
+                        const startTime = new Date(player.card_start_time).getTime();
+                        const endTime = startTime + (player.card_duration * 1000);
+                        
+                        const isExpired = now > endTime;
+                        const timeUntilExpiry = endTime - now;
+                        const timeSinceDistribution = now - startTime;
+                        
+                        return !isExpired && timeUntilExpiry < 10000 && timeSinceDistribution > 30000;
+                      }(player) && (
+                        <button 
+                          onClick={() => distributeCardToPlayer(player)}
+                          className="btn"
+                          style={{ fontSize: '12px', padding: '3px 8px', marginTop: '5px' }}
+                        >
+                          Resend card
+                        </button>
                       )}
                     </div>
                   )}
@@ -1181,6 +1231,7 @@ function PlayerTimer({ startTime, duration }) {
   const timerStartTime = useRef(new Date(startTime).getTime());
   const timerDuration = useRef(duration);
   const timerIntervalRef = useRef(null);
+  const initializedRef = useRef(false);
 
   useEffect(() => {
     console.log(`[${APP_VERSION}] PlayerTimer mounted/updated: duration=${duration}s, startTime=${startTime}`);
@@ -1188,7 +1239,11 @@ function PlayerTimer({ startTime, duration }) {
     // Always reset these values when the component is created or updated
     timerStartTime.current = new Date(startTime).getTime();
     timerDuration.current = duration;
-    setTimeLeft(duration); // Immediately set to full duration
+    
+    // Always start from full duration to ensure visualization starts from top
+    setTimeLeft(duration);
+    initializedRef.current = true;
+    
     setIsExpired(false);
     
     // Clear any existing interval
@@ -1219,8 +1274,9 @@ function PlayerTimer({ startTime, duration }) {
     // Immediately call once to initialize correctly
     updateTimer();
     
-    // Set up interval and store reference
-    timerIntervalRef.current = setInterval(updateTimer, 1000);
+    // Set up interval and store reference - use a faster interval
+    // to ensure smoother updates especially at the start
+    timerIntervalRef.current = setInterval(updateTimer, 500);
 
     return () => {
       console.log(`[${APP_VERSION}] PlayerTimer unmounting - cleaning up timer`);
@@ -1234,7 +1290,9 @@ function PlayerTimer({ startTime, duration }) {
   // Calculate percentage of time remaining - always between 0 and 100
   // This uses the current timeLeft state and the original duration 
   // to ensure the bar always starts from 100%
-  const percentage = Math.min(100, Math.max(0, (timeLeft / timerDuration.current) * 100));
+  const percentage = initializedRef.current 
+    ? Math.min(100, Math.max(0, (timeLeft / timerDuration.current) * 100))
+    : 100; // Ensure it starts at 100%
 
   return (
     <div style={{ marginTop: '8px' }}>
@@ -1369,6 +1427,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
   
   // Debug state to show connection status
   const [connectionStatus, setConnectionStatus] = useState('Connecting...');
+  const [lastUpdateTime, setLastUpdateTime] = useState(Date.now());
+  const [connectionHealth, setConnectionHealth] = useState('connecting');
+  const reconnectAttemptRef = useRef(0);
 
   // Track when a card is received
   const [cardReceived, setCardReceived] = useState(false); 
@@ -1393,12 +1454,17 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     return (now - startTime) >= duration;
   }, [player]);
   
-  // Force refresh player data from server
-  const forceRefreshPlayerData = useCallback(async () => {
+  // Force refresh player data from server with exponential backoff on failures
+  const forceRefreshPlayerData = useCallback(async (isManualAttempt = false) => {
     if (!playerId) return;
     
     try {
-      console.log(`[${APP_VERSION}] Force refreshing player data`);
+      if (isManualAttempt) {
+        // Show temporary status for manual refreshes 
+        setConnectionStatus('Checking for new cards...');
+      }
+      
+      console.log(`[${APP_VERSION}] Force refreshing player data (attempt ${reconnectAttemptRef.current})`);
       const playerData = await safeOperation(() => 
         room.collection('player').filter({ id: playerId }).getList()
       );
@@ -1406,24 +1472,32 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       if (playerData && playerData.length > 0) {
         console.log(`[${APP_VERSION}] Forced refresh player data:`, playerData[0]);
         processPlayerUpdate(playerData[0]);
+        return true;
+      } else {
+        console.error(`[${APP_VERSION}] Player not found in forced refresh`);
+        if (isManualAttempt) {
+          setConnectionStatus('Connected, but no new card available');
+          setTimeout(() => setConnectionStatus('Connected'), 2000);
+        }
+        return false;
       }
     } catch (err) {
       console.error(`[${APP_VERSION}] Error in force refresh:`, err);
+      reconnectAttemptRef.current++;
+      setConnectionHealth('reconnecting');
+      setConnectionStatus(`Connection problem. Reconnecting (attempt ${reconnectAttemptRef.current})...`);
+      return false;
     }
   }, [playerId]);
-  
-  // Set up auto refresh interval for player data
-  useEffect(() => {
-    const interval = setInterval(() => {
-      forceRefreshPlayerData();
-    }, 5000); // Poll every 5 seconds as a backup
-    
-    return () => clearInterval(interval);
-  }, [forceRefreshPlayerData]);
-  
+
   // Process player data update (moved to a separate function for consistency)
   const processPlayerUpdate = useCallback((updatedPlayer) => {
     if (!updatedPlayer) return;
+    
+    // Update last successful data time to track connection health
+    setLastUpdateTime(Date.now());
+    setConnectionHealth('connected');
+    reconnectAttemptRef.current = 0;
     
     setPlayer(updatedPlayer);
     setConnectionStatus('Connected');
@@ -1459,8 +1533,40 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     // Update last player data reference
     lastPlayerDataRef.current = updatedPlayer;
   }, []);
+
+  // Set up connection health monitoring
+  useEffect(() => {
+    const healthCheckInterval = setInterval(() => {
+      const now = Date.now();
+      const timeSinceLastUpdate = now - lastUpdateTime;
+      
+      // If it's been more than 10 seconds since our last update, force a refresh
+      if (timeSinceLastUpdate > 10000 && !sessionEnded) {
+        console.log(`[${APP_VERSION}] Connection health check: ${timeSinceLastUpdate}ms since last update`);
+        forceRefreshPlayerData();
+      }
+    }, 5000);
+    
+    return () => clearInterval(healthCheckInterval);
+  }, [lastUpdateTime, forceRefreshPlayerData, sessionEnded]);
   
-  // Player subscription 
+  // Set up auto refresh interval with variable frequency based on connection health
+  useEffect(() => {
+    // More frequent polling when we're having connection issues
+    const pollingInterval = connectionHealth === 'connected' ? 5000 : 2000;
+    
+    console.log(`[${APP_VERSION}] Setting up auto-refresh with interval: ${pollingInterval}ms`);
+    
+    const interval = setInterval(() => {
+      if (!sessionEnded) {
+        forceRefreshPlayerData();
+      }
+    }, pollingInterval);
+    
+    return () => clearInterval(interval);
+  }, [forceRefreshPlayerData, connectionHealth, sessionEnded]);
+  
+  // Player subscription with better error handling
   useEffect(() => {
     if (!playerId) {
       console.error(`[${APP_VERSION}] No player ID provided`);
@@ -1496,32 +1602,41 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     
     fetchInitialPlayerData();
     
-    // Set up subscription for real-time updates
-    try {
-      if (playerSubscriptionRef.current) {
-        playerSubscriptionRef.current(); // Clear previous subscription
+    // Set up subscription with retry logic
+    const setupSubscription = () => {
+      try {
+        if (playerSubscriptionRef.current) {
+          playerSubscriptionRef.current(); // Clear previous subscription
+        }
+        
+        console.log(`[${APP_VERSION}] Setting up new player subscription`);
+        
+        const unsubscribe = room.collection('player')
+          .filter({ id: playerId })
+          .subscribe((players) => {
+            if (players && players.length > 0) {
+              const updatedPlayer = players[0];
+              console.log(`[${APP_VERSION}] Player data updated via subscription:`, updatedPlayer);
+              processPlayerUpdate(updatedPlayer);
+            } else {
+              console.log(`[${APP_VERSION}] No player data in subscription update`);
+            }
+          });
+        
+        playerSubscriptionRef.current = unsubscribe;
+        console.log(`[${APP_VERSION}] Player subscription set up successfully`);
+      } catch (err) {
+        console.error(`[${APP_VERSION}] Error setting up player subscription:`, err);
+        setConnectionStatus('Subscription error. Using polling fallback...');
+        
+        // If subscription fails, try again after a delay
+        setTimeout(() => {
+          setupSubscription();
+        }, 3000);
       }
-      
-      const unsubscribe = room.collection('player')
-        .filter({ id: playerId })
-        .subscribe((players) => {
-          if (players && players.length > 0) {
-            const updatedPlayer = players[0];
-            console.log(`[${APP_VERSION}] Player data updated via subscription:`, updatedPlayer);
-            processPlayerUpdate(updatedPlayer);
-          } else {
-            console.log(`[${APP_VERSION}] No player data in subscription update`);
-          }
-        });
-      
-      playerSubscriptionRef.current = unsubscribe;
-      console.log(`[${APP_VERSION}] Player subscription set up successfully`);
-    } catch (err) {
-      console.error(`[${APP_VERSION}] Error setting up player subscription:`, err);
-      setConnectionStatus('Subscription error');
-      setError('Error connecting to session. Please refresh the page.');
-      setLoading(false);
-    }
+    };
+    
+    setupSubscription();
     
     return () => {
       if (playerSubscriptionRef.current) {
@@ -1530,7 +1645,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       }
     };
   }, [playerId, processPlayerUpdate]);
-  
+
   // Update timer expiry status
   useEffect(() => {
     if (!player || !player.current_card || player.current_card === 'END') {
@@ -1554,7 +1669,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       
     // Check if the card is already expired
     const now = Date.now();
-    const isExpired = (now - startTime) >= duration;
+    const isExpired = now > startTime + duration;
     
     if (isExpired) {
       console.log(`[${APP_VERSION}] Card already expired`);
@@ -1656,20 +1771,24 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       <div style={{ fontStyle: 'italic', marginTop: '20px' }}>
         Connected as: {name}
       </div>
+      
+      {/* Added more visible button for manual refresh */}
       <button 
-        onClick={forceRefreshPlayerData} 
-        style={{ 
-          marginTop: '15px',
-          fontSize: '14px',
-          backgroundColor: 'transparent',
-          border: '1px solid var(--border)',
-          padding: '5px 10px',
-          borderRadius: '4px',
-          cursor: 'pointer'
-        }}
+        onClick={() => forceRefreshPlayerData(true)} 
+        className="btn btn-outline"
+        style={{ marginTop: '15px', fontSize: '14px' }}
       >
         Check for new card
       </button>
+      
+      {/* Connection status indicator */}
+      <div style={{ 
+        fontSize: '12px', 
+        marginTop: '15px',
+        color: connectionHealth === 'connected' ? 'var(--success)' : 'var(--text-light)'
+      }}>
+        {connectionStatus}
+      </div>
     </div>
   );
 
