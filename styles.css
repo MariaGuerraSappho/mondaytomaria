@@ -415,6 +415,60 @@ button, input, select, textarea {
   }
 }
 
+/* New styles for deck management */
+.deck-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px;
+  margin: 5px 0;
+  border-radius: 8px;
+  background-color: rgba(255, 255, 255, 0.5);
+  border: 1px solid var(--border);
+  transition: all 0.2s;
+}
+
+.deck-item:hover {
+  background-color: rgba(255, 78, 138, 0.05);
+}
+
+.deck-item.selected {
+  border-color: var(--primary);
+  background-color: rgba(255, 78, 138, 0.1);
+}
+
+.deck-item.archived {
+  opacity: 0.7;
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
+.deck-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.deck-action-btn {
+  background: none;
+  border: none;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-light);
+}
+
+.deck-action-btn:hover {
+  background-color: rgba(0, 0, 0, 0.1);
+}
+
+.deck-action-btn.delete {
+  color: var(--error);
+}
+
+.deck-action-btn.delete:hover {
+  background-color: rgba(231, 76, 60, 0.1);
+}
+
 /* Media queries */
 @media (max-width: 600px) {
   .container {

@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.3.0 (build 248)";
+const APP_VERSION = "2.4.0 (build 256)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -64,8 +64,11 @@ function ConductorView({ onNavigate }) {
   const [maxTimerSeconds, setMaxTimerSeconds] = useState(90);
   const [newDeckName, setNewDeckName] = useState('');
   const [newDeckCards, setNewDeckCards] = useState('');
+  const [autoDistribute, setAutoDistribute] = useState(true);
+  const [showArchivedDecks, setShowArchivedDecks] = useState(false);
   const fileInputRef = useRef(null);
   const playersSubscriptionRef = useRef(null);
+  const autoDistributeIntervalRef = useRef(null);
 
   // Load decks
   useEffect(() => {
@@ -73,9 +76,14 @@ function ConductorView({ onNavigate }) {
       try {
         setLoading(true);
         const deckList = await safeOperation(() => room.collection('deck').getList());
-        setDecks(deckList);
-        if (deckList.length > 0 && !selectedDeck) {
-          setSelectedDeck(deckList[0].id);
+        // Filter out archived decks unless showArchivedDecks is true
+        const filteredDecks = showArchivedDecks 
+          ? deckList 
+          : deckList.filter(deck => !deck.archived);
+        
+        setDecks(filteredDecks);
+        if (filteredDecks.length > 0 && !selectedDeck) {
+          setSelectedDeck(filteredDecks[0].id);
         }
       } catch (error) {
         setError('Failed to load decks');
@@ -86,7 +94,7 @@ function ConductorView({ onNavigate }) {
     };
 
     loadDecks();
-  }, []);
+  }, [showArchivedDecks]);
 
   // Manual refresh for player list
   const refreshPlayerList = async () => {
@@ -139,6 +147,66 @@ function ConductorView({ onNavigate }) {
     }
   }, [pin]);
 
+  // Function to toggle deck archive status
+  const toggleDeckArchive = async (deckId, isCurrentlyArchived) => {
+    try {
+      setLoading(true);
+      await safeOperation(() => 
+        room.collection('deck').update(deckId, {
+          archived: !isCurrentlyArchived
+        })
+      );
+      
+      // Update local state to reflect changes
+      setDecks(prevDecks => 
+        prevDecks.map(deck => 
+          deck.id === deckId ? {...deck, archived: !isCurrentlyArchived} : deck
+        )
+      );
+      
+      setSuccess(`Deck ${isCurrentlyArchived ? 'restored' : 'archived'}`);
+      setTimeout(() => setSuccess(''), 2000);
+    } catch (error) {
+      setError('Failed to update deck');
+      console.error('Error updating deck:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Function to delete a deck
+  const deleteDeck = async (deckId) => {
+    if (!confirm('Are you sure you want to permanently delete this deck?')) {
+      return;
+    }
+    
+    try {
+      setLoading(true);
+      await safeOperation(() => room.collection('deck').delete(deckId));
+      
+      // Update local state
+      setDecks(prevDecks => prevDecks.filter(deck => deck.id !== deckId));
+      
+      // If the selected deck was deleted, select another one
+      if (selectedDeck === deckId) {
+        const remainingDecks = decks.filter(deck => deck.id !== deckId);
+        if (remainingDecks.length > 0) {
+          setSelectedDeck(remainingDecks[0].id);
+        } else {
+          setSelectedDeck('');
+        }
+      }
+      
+      setSuccess('Deck deleted');
+      setTimeout(() => setSuccess(''), 2000);
+    } catch (error) {
+      setError('Failed to delete deck');
+      console.error('Error deleting deck:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Create new deck
   const handleCreateDeck = async () => {
     if (!newDeckName.trim() || !newDeckCards.trim()) {
@@ -165,7 +233,8 @@ function ConductorView({ onNavigate }) {
         room.collection('deck').create({
           name: newDeckName,
           cards: cards,
-          card_count: cards.length
+          card_count: cards.length,
+          archived: false
         })
       );
 
@@ -211,7 +280,8 @@ function ConductorView({ onNavigate }) {
                   room.collection('deck').create({
                     name: deck.name,
                     cards: deck.cards.filter(card => card && card.trim()),
-                    card_count: deck.cards.filter(card => card && card.trim()).length
+                    card_count: deck.cards.filter(card => card && card.trim()).length,
+                    archived: false
                   })
                 );
                 successCount++;
@@ -226,9 +296,13 @@ function ConductorView({ onNavigate }) {
 
           // Refresh decks
           const updatedDecks = await safeOperation(() => room.collection('deck').getList());
-          setDecks(updatedDecks);
-          if (updatedDecks.length > 0 && !selectedDeck) {
-            setSelectedDeck(updatedDecks[0].id);
+          const filteredDecks = showArchivedDecks 
+            ? updatedDecks 
+            : updatedDecks.filter(deck => !deck.archived);
+          setDecks(filteredDecks);
+          
+          if (filteredDecks.length > 0 && !selectedDeck) {
+            setSelectedDeck(filteredDecks[0].id);
           }
         }
         // Handle single deck
@@ -238,7 +312,8 @@ function ConductorView({ onNavigate }) {
               room.collection('deck').create({
                 name: deckData.name,
                 cards: deckData.cards.filter(card => card && card.trim()),
-                card_count: deckData.cards.filter(card => card && card.trim()).length
+                card_count: deckData.cards.filter(card => card && card.trim()).length,
+                archived: false
               })
             );
             
@@ -271,7 +346,8 @@ function ConductorView({ onNavigate }) {
             room.collection('deck').create({
               name,
               cards,
-              card_count: cards.length
+              card_count: cards.length,
+              archived: false
             })
           );
 
@@ -320,7 +396,8 @@ function ConductorView({ onNavigate }) {
           min_timer_seconds: minTimerSeconds,
           max_timer_seconds: maxTimerSeconds,
           active_deck_id: selectedDeck,
-          ended: false
+          ended: false,
+          auto_distribute: autoDistribute
         })
       );
 
@@ -359,97 +436,80 @@ function ConductorView({ onNavigate }) {
     };
   }, [pin, setupPlayerSubscription]);
 
-  // Distribute cards
-  const handleDistributeCards = async () => {
+  // Distribute cards to a single player
+  const distributeCardToPlayer = async (player) => {
     if (!sessionId || !selectedDeck) {
-      setError('Session or deck not selected');
-      return;
-    }
-
-    if (players.length === 0) {
-      setError('No players have joined yet');
-      return;
+      console.log("[${APP_VERSION}] Cannot distribute: missing session or deck");
+      return false;
     }
 
     try {
-      setLoading(true);
-      setError('');
-
-      // Get all available decks for random mode
-      let allDecks = decks;
+      console.log(`[${APP_VERSION}] Distributing new card to player: ${player.name}`);
+      
+      // Get selected deck info
       let selectedDeckData = decks.find(d => d.id === selectedDeck);
       
       if (!selectedDeckData || !selectedDeckData.cards || selectedDeckData.cards.length === 0) {
-        setError('Selected deck has no cards');
-        setLoading(false);
-        return;
+        console.error(`[${APP_VERSION}] Selected deck has no cards`);
+        return false;
       }
 
-      console.log(`[${APP_VERSION}] Distribution started: deck=${selectedDeckData.name}, mode=${distributionMode}, players=${players.length}`);
+      // Generate random duration between min and max timer settings
+      const randomDuration = Math.floor(
+        Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
+      );
 
-      // Distribute cards based on mode
+      let selectedCard;
+      let selectedDeckName = selectedDeckData.name;
+      let selectedDeckId = selectedDeckData.id;
+
+      // Choose a card based on distribution mode
       if (distributionMode === 'unison') {
-        // Everyone gets the same card
-        const cards = selectedDeckData.cards;
-        const randomIndex = Math.floor(Math.random() * cards.length);
-        const selectedCard = cards[randomIndex];
-        console.log(`[${APP_VERSION}] Unison mode: selected card "${selectedCard}"`);
-
-        for (const player of players) {
-          // Generate random duration between min and max timer settings
-          const randomDuration = Math.floor(
-            Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
-          );
-
-          console.log(`[${APP_VERSION}] Assigning card to ${player.name}, duration=${randomDuration}s`);
-          
-          try {
-            await safeOperation(() =>
-              room.collection('player').update(player.id, {
-                current_card: selectedCard,
-                current_deck_name: selectedDeckData.name,
-                current_deck_id: selectedDeckData.id,
-                card_start_time: new Date().toISOString(),
-                card_duration: randomDuration
-              })
-            );
-          } catch (err) {
-            console.error(`[${APP_VERSION}] Failed to update player ${player.name}:`, err);
-          }
+        // Everyone gets the same card - find what the currently active card is
+        // If there's already a unison card being shown, use that
+        const activeUnison = players.find(p => 
+          p.current_card && p.current_card !== 'END' && 
+          new Date(p.card_start_time).getTime() + (p.card_duration * 1000) > Date.now()
+        );
+        
+        if (activeUnison) {
+          selectedCard = activeUnison.current_card;
+          selectedDeckName = activeUnison.current_deck_name;
+          selectedDeckId = activeUnison.current_deck_id;
+          console.log(`[${APP_VERSION}] Unison mode: using existing active card "${selectedCard}"`);
+        } else {
+          // Select a new card for everyone
+          const cards = selectedDeckData.cards;
+          const randomIndex = Math.floor(Math.random() * cards.length);
+          selectedCard = cards[randomIndex];
+          console.log(`[${APP_VERSION}] Unison mode: selected new card "${selectedCard}"`);
         }
-      } else if (distributionMode === 'unique') {
-        // Each player gets a unique card if possible
+      } 
+      else if (distributionMode === 'unique') {
+        // Each player gets a unique card
         const cards = selectedDeckData.cards;
-        const shuffledCards = [...cards].sort(() => Math.random() - 0.5);
-        console.log(`[${APP_VERSION}] Unique mode: shuffled ${shuffledCards.length} cards`);
-
-        for (let i = 0; i < players.length; i++) {
-          const cardIndex = i % shuffledCards.length; // Wrap around if more players than cards
-          const selectedCard = shuffledCards[cardIndex];
-
-          // Generate random duration between min and max timer settings
-          const randomDuration = Math.floor(
-            Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
-          );
-
-          console.log(`[${APP_VERSION}] Assigning card "${selectedCard}" to ${players[i].name}, duration=${randomDuration}s`);
-          
-          try {
-            await safeOperation(() =>
-              room.collection('player').update(players[i].id, {
-                current_card: selectedCard,
-                current_deck_name: selectedDeckData.name,
-                current_deck_id: selectedDeckData.id,
-                card_start_time: new Date().toISOString(),
-                card_duration: randomDuration
-              })
-            );
-          } catch (err) {
-            console.error(`[${APP_VERSION}] Failed to update player ${players[i].name}:`, err);
-          }
+        
+        // Try to find a card that no other player currently has
+        const activePlayerCards = players
+          .filter(p => p.current_card && p.current_card !== 'END')
+          .map(p => p.current_card);
+        
+        const availableCards = cards.filter(card => !activePlayerCards.includes(card));
+        
+        if (availableCards.length > 0) {
+          // We have cards that no one else is using
+          const randomIndex = Math.floor(Math.random() * availableCards.length);
+          selectedCard = availableCards[randomIndex];
+        } else {
+          // All cards are in use, just pick a random one
+          const randomIndex = Math.floor(Math.random() * cards.length);
+          selectedCard = cards[randomIndex];
         }
-      } else if (distributionMode === 'random') {
-        // Each player gets a random card from any available deck (duplicates allowed)
+        
+        console.log(`[${APP_VERSION}] Unique mode: selected card "${selectedCard}" for ${player.name}`);
+      } 
+      else if (distributionMode === 'random') {
+        // Each player gets a random card from any available deck
         console.log(`[${APP_VERSION}] Random mode: selecting from all available decks`);
         
         // Create a combined list of all cards from all decks with deck info
@@ -467,38 +527,117 @@ function ConductorView({ onNavigate }) {
         });
         
         if (allCards.length === 0) {
-          setError('No cards available in any deck');
-          setLoading(false);
-          return;
+          console.error(`[${APP_VERSION}] No cards available in any deck`);
+          return false;
         }
         
-        console.log(`[${APP_VERSION}] Random mode: combined ${allCards.length} cards from all decks`);
+        const randomIndex = Math.floor(Math.random() * allCards.length);
+        const selectedCardObj = allCards[randomIndex];
         
-        for (const player of players) {
-          const randomIndex = Math.floor(Math.random() * allCards.length);
-          const selectedCardObj = allCards[randomIndex];
+        selectedCard = selectedCardObj.text;
+        selectedDeckName = selectedCardObj.deck_name;
+        selectedDeckId = selectedCardObj.deck_id;
+        
+        console.log(`[${APP_VERSION}] Random mode: selected card "${selectedCard}" from deck "${selectedDeckName}" for ${player.name}`);
+      }
 
-          // Generate random duration between min and max timer settings
-          const randomDuration = Math.floor(
-            Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
-          );
+      // Update the player with their new card
+      await safeOperation(() =>
+        room.collection('player').update(player.id, {
+          current_card: selectedCard,
+          current_deck_name: selectedDeckName,
+          current_deck_id: selectedDeckId,
+          card_start_time: new Date().toISOString(),
+          card_duration: randomDuration
+        })
+      );
+      
+      console.log(`[${APP_VERSION}] Card distributed to ${player.name}, duration=${randomDuration}s`);
+      return true;
+    } catch (error) {
+      console.error(`[${APP_VERSION}] Error distributing card to ${player.name}:`, error);
+      return false;
+    }
+  };
 
-          console.log(`[${APP_VERSION}] Assigning random card "${selectedCardObj.text}" from deck "${selectedCardObj.deck_name}" to ${player.name}, duration=${randomDuration}s`);
-          
-          try {
-            await safeOperation(() =>
-              room.collection('player').update(player.id, {
-                current_card: selectedCardObj.text,
-                current_deck_name: selectedCardObj.deck_name,
-                current_deck_id: selectedCardObj.deck_id,
-                card_start_time: new Date().toISOString(),
-                card_duration: randomDuration
-              })
-            );
-          } catch (err) {
-            console.error(`[${APP_VERSION}] Failed to update player ${player.name}:`, err);
+  // Auto-distribute cards to players with expired timers
+  useEffect(() => {
+    // Clean up previous interval
+    if (autoDistributeIntervalRef.current) {
+      clearInterval(autoDistributeIntervalRef.current);
+      autoDistributeIntervalRef.current = null;
+    }
+    
+    // Set up new interval if in session and auto-distribute is enabled
+    if (step === 'session' && autoDistribute && players.length > 0) {
+      console.log(`[${APP_VERSION}] Starting auto-distribution interval`);
+      
+      autoDistributeIntervalRef.current = setInterval(async () => {
+        // Check for players with expired cards
+        const now = Date.now();
+        const playersNeedingCards = players.filter(player => {
+          // Skip players without cards or with END signal
+          if (!player.current_card || player.current_card === 'END') {
+            return true; // New players or players who just joined need cards
           }
+          
+          // Check if card timer has expired
+          if (!player.card_start_time || !player.card_duration) {
+            return true; // Something's wrong with the timer
+          }
+          
+          const cardStartTime = new Date(player.card_start_time).getTime();
+          const cardEndTime = cardStartTime + (player.card_duration * 1000);
+          
+          return now > cardEndTime; // Card has expired
+        });
+        
+        // Distribute new cards to players who need them
+        if (playersNeedingCards.length > 0) {
+          console.log(`[${APP_VERSION}] Auto-distributing cards to ${playersNeedingCards.length} players`);
+          
+          for (const player of playersNeedingCards) {
+            await distributeCardToPlayer(player);
+          }
+          
+          // Force refresh player list to show updated cards
+          setTimeout(refreshPlayerList, 1000);
         }
+      }, 5000); // Check every 5 seconds
+    }
+    
+    return () => {
+      if (autoDistributeIntervalRef.current) {
+        clearInterval(autoDistributeIntervalRef.current);
+        autoDistributeIntervalRef.current = null;
+      }
+    };
+  }, [step, autoDistribute, players, selectedDeck, distributionMode, minTimerSeconds, maxTimerSeconds]);
+
+  // Distribute cards (manual trigger)
+  const handleDistributeCards = async () => {
+    if (!sessionId || !selectedDeck) {
+      setError('Session or deck not selected');
+      return;
+    }
+
+    if (players.length === 0) {
+      setError('No players have joined yet');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError('');
+
+      console.log(`[${APP_VERSION}] Manual distribution started: mode=${distributionMode}, players=${players.length}`);
+
+      // Distribute cards to all players
+      let successCount = 0;
+      
+      for (const player of players) {
+        const success = await distributeCardToPlayer(player);
+        if (success) successCount++;
       }
 
       // Update session with latest distribution settings
@@ -508,7 +647,8 @@ function ConductorView({ onNavigate }) {
           distribution_mode: distributionMode,
           min_timer_seconds: minTimerSeconds,
           max_timer_seconds: maxTimerSeconds,
-          active_deck_id: selectedDeck
+          active_deck_id: selectedDeck,
+          auto_distribute: autoDistribute
         })
       );
 
@@ -517,7 +657,7 @@ function ConductorView({ onNavigate }) {
       // Force refresh player list to show updated cards
       setTimeout(refreshPlayerList, 1000);
 
-      setSuccess(`Cards distributed to ${players.length} players`);
+      setSuccess(`Cards distributed to ${successCount} players`);
       setTimeout(() => setSuccess(''), 3000);
     } catch (error) {
       setError('Failed to distribute cards');
@@ -596,6 +736,71 @@ function ConductorView({ onNavigate }) {
                   </option>
                 ))}
               </select>
+              
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '10px' }}>
+                <button 
+                  className="btn btn-outline" 
+                  style={{ padding: '5px 10px', fontSize: '14px' }}
+                  onClick={() => setShowArchivedDecks(!showArchivedDecks)}
+                >
+                  {showArchivedDecks ? 'Hide Archived' : 'Show Archived'}
+                </button>
+              </div>
+              
+              {decks.length > 0 && (
+                <div style={{ marginTop: '10px', maxHeight: '150px', overflowY: 'auto' }}>
+                  {decks.map(deck => (
+                    <div key={deck.id} style={{ 
+                      display: 'flex', 
+                      justifyContent: 'space-between',
+                      alignItems: 'center', 
+                      padding: '8px',
+                      margin: '5px 0',
+                      backgroundColor: deck.archived ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.5)',
+                      borderRadius: '4px',
+                      border: deck.id === selectedDeck ? '1px solid var(--primary)' : '1px solid var(--border)'
+                    }}>
+                      <div>
+                        <div style={{ fontWeight: deck.id === selectedDeck ? 'bold' : 'normal' }}>
+                          {deck.name} {deck.archived && <span style={{ opacity: 0.6 }}>(archived)</span>}
+                        </div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-light)' }}>
+                          {deck.card_count || deck.cards.length} cards
+                        </div>
+                      </div>
+                      <div>
+                        <button 
+                          onClick={() => toggleDeckArchive(deck.id, deck.archived)}
+                          style={{ 
+                            background: 'none', 
+                            border: 'none', 
+                            cursor: 'pointer',
+                            color: 'var(--text-light)',
+                            fontSize: '12px',
+                            padding: '4px 8px',
+                            marginRight: '5px'
+                          }}
+                        >
+                          {deck.archived ? 'Restore' : 'Archive'}
+                        </button>
+                        <button 
+                          onClick={() => deleteDeck(deck.id)}
+                          style={{ 
+                            background: 'none', 
+                            border: 'none', 
+                            cursor: 'pointer',
+                            color: 'var(--error)',
+                            fontSize: '12px',
+                            padding: '4px 8px'
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ) : (
             <p className="notice">No decks available. Create one below.</p>
@@ -611,7 +816,7 @@ function ConductorView({ onNavigate }) {
             >
               <option value="unison">Unison - All players get the same card</option>
               <option value="unique">Unique - Each player gets a different card</option>
-              <option value="random">Random - Each player gets a random card</option>
+              <option value="random">Random - Each player gets a random card from any deck</option>
             </select>
           </div>
           <div>
@@ -652,6 +857,18 @@ function ConductorView({ onNavigate }) {
                 />
               </div>
             </div>
+          </div>
+          
+          <div style={{ margin: '15px 0' }}>
+            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={autoDistribute}
+                onChange={() => setAutoDistribute(!autoDistribute)}
+                style={{ marginRight: '10px' }}
+              />
+              Automatically distribute new cards when timers expire
+            </label>
           </div>
 
           <button
@@ -839,7 +1056,7 @@ function ConductorView({ onNavigate }) {
             >
               <option value="unison">Unison - All players get the same card</option>
               <option value="unique">Unique - Each player gets a different card</option>
-              <option value="random">Random - Each player gets a random card</option>
+              <option value="random">Random - Each player gets a random card from any deck</option>
             </select>
           </div>
           <div className="distribution-section">
@@ -895,10 +1112,31 @@ function ConductorView({ onNavigate }) {
               ))}
             </select>
           </div>
+          <div className="distribution-section">
+            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={autoDistribute}
+                onChange={() => {
+                  setAutoDistribute(!autoDistribute);
+                  // Also update the session settings
+                  if (sessionId) {
+                    safeOperation(() =>
+                      room.collection('session').update(sessionId, {
+                        auto_distribute: !autoDistribute
+                      })
+                    );
+                  }
+                }}
+                style={{ marginRight: '10px' }}
+              />
+              Automatically distribute new cards when timers expire
+            </label>
+          </div>
         </div>
 
         <div className="next-card-notice">
-          <span className="emoji">👇</span> Click the button below to distribute cards to all players <span className="emoji">👇</span>
+          <span className="emoji">👇</span> Click the button below to immediately distribute cards to all players <span className="emoji">👇</span>
         </div>
 
         <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
