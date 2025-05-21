@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.14.0 (build 319)";
+const APP_VERSION = "2.15.0 (build 320)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -1551,11 +1551,21 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         if (playerData.current_card && playerData.current_card !== 'END') {
           console.log(`[${APP_VERSION}] Player already has card: ${playerData.current_card}`);
           
+          // Acknowledge that we've received this card to ensure conductor knows
+          acknowledgedDistributionIdRef.current = playerData.distribution_id;
+          
+          await updatePlayerStatus({
+            waiting_for_player_ack: false,
+            card_received: true,
+            ready_for_card: false
+          });
+          
           setCard({
             text: playerData.current_card,
             deckName: playerData.current_deck_name || 'Unknown',
             startTime: playerData.card_start_time ? new Date(playerData.card_start_time) : new Date(),
-            duration: playerData.card_duration || 30
+            duration: playerData.card_duration || 30,
+            distributionId: playerData.distribution_id
           });
           
           setWaitingForCard(false);
@@ -1567,6 +1577,35 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             const now = Date.now();
             const remaining = Math.max(0, endTime - now);
             setTimeLeft(Math.ceil(remaining / 1000));
+            
+            // If there's still time left, start the timer
+            if (remaining > 0) {
+              setTimerStarted(true);
+              
+              timerRef.current = setInterval(() => {
+                setTimeLeft(prevTime => {
+                  if (prevTime <= 1) {
+                    clearInterval(timerRef.current);
+                    setTimerStarted(false);
+                    
+                    // Mark as ready for next card
+                    updatePlayerStatus({
+                      ready_for_card: true
+                    });
+                    setWaitingForCard(true);
+                    
+                    return 0;
+                  }
+                  return prevTime - 1;
+                });
+              }, 1000);
+            } else {
+              // Card has expired, mark as ready for a new one
+              updatePlayerStatus({
+                ready_for_card: true
+              });
+              setWaitingForCard(true);
+            }
           }
         } else if (playerData.current_card === 'END') {
           setCard({ text: 'Session Ended', isEnd: true });
@@ -1581,6 +1620,8 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             waiting_for_player_ack: false,
             card_received: false
           });
+          
+          console.log(`[${APP_VERSION}] Player ready for first card`);
         }
         
         // Set up subscription for player updates
@@ -1592,13 +1633,26 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             const updatedPlayer = updatedPlayers[0];
             playerRef.current = updatedPlayer;
             
+            console.log(`[${APP_VERSION}] Player update received:`, {
+              current_card: updatedPlayer.current_card,
+              distribution_id: updatedPlayer.distribution_id,
+              waiting_for_ack: updatedPlayer.waiting_for_player_ack,
+              ready_for_card: updatedPlayer.ready_for_card
+            });
+            
             // Handle new card
             if (updatedPlayer.current_card && 
                 updatedPlayer.current_card !== 'END' && 
                 (!card || card.text !== updatedPlayer.current_card || 
-                 acknowledgedDistributionIdRef.current !== updatedPlayer.distribution_id)) {
+                 (updatedPlayer.distribution_id && acknowledgedDistributionIdRef.current !== updatedPlayer.distribution_id))) {
               
               console.log(`[${APP_VERSION}] New card received: ${updatedPlayer.current_card}`);
+              
+              // Clear any existing timer
+              if (timerRef.current) {
+                clearInterval(timerRef.current);
+                timerRef.current = null;
+              }
               
               const newCard = {
                 text: updatedPlayer.current_card,
@@ -1611,6 +1665,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
               // Acknowledge card receipt
               acknowledgedDistributionIdRef.current = updatedPlayer.distribution_id;
               cardReceivedRef.current = true;
+              waitingAcknowledgedRef.current = false;
               
               // Update server that we've received the card
               updatePlayerStatus({
@@ -1620,29 +1675,24 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
                 ready_for_card: false
               });
               
-              // Start a new timer for this card
-              if (timerRef.current) {
-                clearInterval(timerRef.current);
-              }
-              
               setCard(newCard);
               setTimeLeft(newCard.duration);
               setWaitingForCard(false);
               setTimerStarted(true);
               
+              // Start a new timer for this card
               timerRef.current = setInterval(() => {
                 setTimeLeft(prevTime => {
                   if (prevTime <= 1) {
                     clearInterval(timerRef.current);
+                    timerRef.current = null;
                     setTimerStarted(false);
                     
                     // Mark as ready for next card
-                    setTimeout(() => {
-                      updatePlayerStatus({
-                        ready_for_card: true
-                      });
-                      setWaitingForCard(true);
-                    }, 500);
+                    updatePlayerStatus({
+                      ready_for_card: true
+                    });
+                    setWaitingForCard(true);
                     
                     return 0;
                   }
@@ -1655,6 +1705,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             else if (updatedPlayer.current_card === 'END') {
               if (timerRef.current) {
                 clearInterval(timerRef.current);
+                timerRef.current = null;
               }
               
               setCard({ text: 'Session Ended', isEnd: true });
@@ -1683,31 +1734,35 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       const player = playerRef.current;
       
       if (player && player.waiting_for_player_ack && !waitingAcknowledgedRef.current) {
-        console.log(`[${APP_VERSION}] Acknowledging waiting card`);
+        console.log(`[${APP_VERSION}] Acknowledging waiting card: ${player.current_card}`);
         waitingAcknowledgedRef.current = true;
         
-        updatePlayerStatus({
-          waiting_for_player_ack: false,
-          card_received: true,
-          card_start_time: new Date().toISOString(),
-          ready_for_card: false
-        });
-        
-        // This should trigger the subscription to update the UI
+        // If we have a current card but haven't acknowledged it yet
+        if (player.current_card && player.current_card !== 'END') {
+          updatePlayerStatus({
+            waiting_for_player_ack: false,
+            card_received: true,
+            card_start_time: new Date().toISOString(),
+            ready_for_card: false
+          });
+        }
       }
     }, CARD_RECEIVED_CHECK_INTERVAL);
     
     return () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
+        timerRef.current = null;
       }
       
       if (playerUpdateIntervalRef.current) {
         clearInterval(playerUpdateIntervalRef.current);
+        playerUpdateIntervalRef.current = null;
       }
       
       if (cardReceivedCheckerRef.current) {
         clearInterval(cardReceivedCheckerRef.current);
+        cardReceivedCheckerRef.current = null;
       }
     };
   }, [pin, name, playerId]);
