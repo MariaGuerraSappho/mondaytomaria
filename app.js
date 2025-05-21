@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.4.1 (build 257)";
+const APP_VERSION = "2.4.2 (build 258)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -453,8 +453,8 @@ function ConductorView({ onNavigate }) {
         })
       );
       
-      // Wait a short time to ensure player enters loading state
-      await new Promise(resolve => setTimeout(resolve, 300));
+      // Reduced wait time to 100ms to speed up card distribution
+      await new Promise(resolve => setTimeout(resolve, 100));
       
       // Get selected deck info
       let selectedDeckData = decks.find(d => d.id === selectedDeck);
@@ -551,13 +551,13 @@ function ConductorView({ onNavigate }) {
         console.log(`[${APP_VERSION}] Random mode: selected card "${selectedCard}" from deck "${selectedDeckName}" for ${player.name}`);
       }
 
-      // Update the player with their new card
+      // Update the player with their new card and a fresh timestamp
       await safeOperation(() =>
         room.collection('player').update(player.id, {
           current_card: selectedCard,
           current_deck_name: selectedDeckName,
           current_deck_id: selectedDeckId,
-          card_start_time: new Date().toISOString(),
+          card_start_time: new Date().toISOString(), // Fresh timestamp for accurate timing
           card_duration: randomDuration
         })
       );
@@ -1180,14 +1180,22 @@ function PlayerTimer({ startTime, duration }) {
   const [isExpired, setIsExpired] = useState(false);
   const timerStartTime = useRef(new Date(startTime).getTime());
   const timerDuration = useRef(duration);
+  const timerIntervalRef = useRef(null);
 
-  // Reset expired state when startTime or duration changes
+  // Reset expired state and timer when startTime or duration changes
   useEffect(() => {
     const newStartTime = new Date(startTime).getTime();
     if (newStartTime !== timerStartTime.current || duration !== timerDuration.current) {
+      console.log(`[${APP_VERSION}] Timer reset: new duration=${duration}s, startTime=${startTime}`);
       timerStartTime.current = newStartTime;
       timerDuration.current = duration;
+      setTimeLeft(duration); // Immediately set to full duration
       setIsExpired(false);
+      
+      // Clear any existing interval
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
     }
   }, [startTime, duration]);
 
@@ -1202,16 +1210,25 @@ function PlayerTimer({ startTime, duration }) {
       
       if (remaining === 0 && !isExpired) {
         setIsExpired(true);
+        console.log(`[${APP_VERSION}] Timer expired`);
       }
     };
 
+    // Immediately call once to initialize correctly
     updateTimer();
-    const interval = setInterval(updateTimer, 1000);
+    
+    // Set up interval and store reference
+    timerIntervalRef.current = setInterval(updateTimer, 1000);
 
-    return () => clearInterval(interval);
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+    };
   }, [startTime, duration, isExpired]);
 
-  const percentage = (timeLeft / duration) * 100;
+  const percentage = Math.min(100, Math.max(0, (timeLeft / duration) * 100));
 
   return (
     <div style={{ marginTop: '8px' }}>
@@ -1350,152 +1367,58 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
   // Track when a card is received
   const [cardReceived, setCardReceived] = useState(true); 
   const [clientStartTime, setClientStartTime] = useState(null); 
-  const [clientDuration, setClientDuration] = useState(null); 
+  const [clientDuration, setClientDuration] = useState(null);
   
-  // Find player and subscribe to updates
+  // Track if timer is expired
+  const [isTimerExpired, setIsTimerExpired] = useState(false);
+  const cardExpiryTimerRef = useRef(null);
+  
+  // Function to check if card timer is expired
+  const checkCardExpiry = useCallback(() => {
+    if (!player || !player.card_start_time || !player.card_duration) return false;
+    
+    const startTime = new Date(player.card_start_time).getTime();
+    const duration = player.card_duration * 1000;
+    const now = Date.now();
+    
+    return (now - startTime) >= duration;
+  }, [player]);
+  
+  // Update timer expiry status
   useEffect(() => {
-    if (!pin || !name) return;
-
-    const findPlayer = async () => {
-      try {
-        console.log(`[${APP_VERSION}] Finding player: name=${name}, pin=${pin}, id=${playerId || 'unknown'}`);
-        setConnectionStatus(`Finding player record...`);
-        
-        let players;
-        if (playerId) {
-          // If we have a player ID (from localStorage), use that first
-          const playerById = await safeOperation(() => 
-            room.collection('player').filter({ id: playerId }).getList()
-          );
-          if (playerById.length > 0) {
-            players = playerById;
-            setConnectionStatus(`Found player by ID`);
-          }
-        }
-        
-        // Fallback to finding by name and pin
-        if (!players || players.length === 0) {
-          setConnectionStatus(`Searching by name and pin...`);
-          players = await safeOperation(() =>
-            room.collection('player')
-              .filter({ name, session_pin: pin })
-              .getList()
-          );
-        }
-
-        if (players.length === 0) {
-          setError('Player not found');
-          setConnectionStatus(`Error: Player not found`);
-          setLoading(false);
-          return;
-        }
-
-        console.log(`[${APP_VERSION}] Player found:`, players[0]);
-        setConnectionStatus(`Connected as: ${players[0].name}`);
-        setPlayer(players[0]);
-
-        if (players[0].current_card === 'END') {
-          setSessionEnded(true);
-        }
-
-        setLoading(false);
-      } catch (error) {
-        setError('Error connecting to session');
-        setConnectionStatus(`Connection error: ${error.message}`);
-        console.error('Error finding player:', error);
-        setLoading(false);
-      }
-    };
-
-    findPlayer();
-
-    // Set up subscription to player updates
-    const setupSubscription = () => {
-      // Clear existing subscription if any
-      if (playerSubscriptionRef.current) {
-        playerSubscriptionRef.current();
-        playerSubscriptionRef.current = null;
-      }
-      
-      try {
-        let filterParams = playerId 
-          ? { id: playerId }
-          : { name, session_pin: pin };
-          
-        console.log(`[${APP_VERSION}] Setting up player subscription with filter:`, filterParams);
-        
-        const unsubscribe = room.collection('player')
-          .filter(filterParams)
-          .subscribe(players => {
-            if (players.length > 0) {
-              const updatedPlayer = players[0];
-              console.log(`[${APP_VERSION}] Player update received:`, updatedPlayer);
-              setConnectionStatus(`Connected: ${new Date().toLocaleTimeString()}`);
-              
-              // Check if card changed
-              if (lastCardRef.current !== updatedPlayer.current_card && updatedPlayer.current_card) {
-                console.log(`[${APP_VERSION}] Card changed from "${lastCardRef.current}" to "${updatedPlayer.current_card}"`);
-                setCardAnimating(true);
-                setTimeout(() => setCardAnimating(false), 500);
-              }
-              
-              lastCardRef.current = updatedPlayer.current_card;
-              setPlayer(updatedPlayer);
-
-              if (updatedPlayer.current_card === 'END') {
-                setSessionEnded(true);
-              }
-            } else {
-              console.warn(`[${APP_VERSION}] Player subscription returned empty result`);
-              setConnectionStatus(`Warning: Subscription returned empty result`);
-            }
-          });
-          
-        playerSubscriptionRef.current = unsubscribe;
-        console.log(`[${APP_VERSION}] Player subscription established`);
-      } catch (err) {
-        console.error(`[${APP_VERSION}] Error setting up player subscription:`, err);
-        setConnectionStatus(`Subscription error: ${err.message}`);
-        setError('Connection error. Please try rejoining.');
-      }
-    };
+    if (!player || !player.current_card || player.current_card === 'END') {
+      return;
+    }
     
-    // Set up subscription and refresh it periodically to ensure it's working
-    setupSubscription();
+    // Clear any existing timer
+    if (cardExpiryTimerRef.current) {
+      clearTimeout(cardExpiryTimerRef.current);
+    }
     
-    // Refresh subscription every 10 seconds to ensure we're getting updates
-    const refreshTimer = setInterval(() => {
-      console.log(`[${APP_VERSION}] Refreshing player subscription...`);
-      setupSubscription();
-    }, 10000);
-
+    // Check if the card is already expired
+    if (checkCardExpiry()) {
+      setIsTimerExpired(true);
+      return;
+    }
+    
+    // Set timer to check expiry
+    const startTime = new Date(player.card_start_time).getTime();
+    const duration = player.card_duration * 1000;
+    const timeLeft = Math.max(0, startTime + duration - Date.now());
+    
+    setIsTimerExpired(false);
+    
+    cardExpiryTimerRef.current = setTimeout(() => {
+      console.log(`[${APP_VERSION}] Card timer expired`);
+      setIsTimerExpired(true);
+    }, timeLeft);
+    
     return () => {
-      if (playerSubscriptionRef.current) {
-        playerSubscriptionRef.current();
-        playerSubscriptionRef.current = null;
+      if (cardExpiryTimerRef.current) {
+        clearTimeout(cardExpiryTimerRef.current);
       }
-      clearInterval(refreshTimer);
-      console.log(`[${APP_VERSION}] Player subscription and refresh timer cleared`);
     };
-  }, [pin, name, playerId]);
-
-  // Debug UI for connection issues
-  const renderDebugInfo = () => {
-    if (!error && player) return null;
-    
-    return (
-      <div style={{ marginTop: '20px', fontSize: '12px', backgroundColor: 'rgba(0,0,0,0.05)', padding: '10px', borderRadius: '5px' }}>
-        <div>Status: {connectionStatus}</div>
-        <div>Last update: {new Date().toLocaleTimeString()}</div>
-        <button 
-          style={{ fontSize: '12px', marginTop: '5px', padding: '5px' }}
-          onClick={() => window.location.reload()}
-        >
-          Refresh Connection
-        </button>
-      </div>
-    );
-  };
+  }, [player, checkCardExpiry]);
 
   // Update when a new card is received
   useEffect(() => {
@@ -1505,8 +1428,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         console.log(`[${APP_VERSION}] New card received: "${player.current_card}"`);
         setCardReceived(true);
         setCardAnimating(true);
+        setIsTimerExpired(false);
         
-        // Set client-side timer information
+        // Set client-side timer information with fresh timestamp
         setClientStartTime(new Date().toISOString());
         setClientDuration(player.card_duration);
         
@@ -1519,82 +1443,31 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     }
   }, [player]);
 
-  if (loading) {
-    return (
-      <div className="full-card">
-        <div className="loading-spinner"></div>
-        <div style={{ marginTop: '15px' }}>Connecting to session...</div>
-        <div style={{ fontSize: '14px', color: 'var(--text-light)', marginTop: '10px' }}>
-          {connectionStatus}
-        </div>
+  // Render waiting state (between cards or initially)
+  const renderWaitingState = () => (
+    <div className="full-card">
+      <h3>Waiting for next card...</h3>
+      <div className="waiting-animation">
+        <div className="dot"></div>
+        <div className="dot"></div>
+        <div className="dot"></div>
       </div>
-    );
+      <p style={{ margin: '15px 0' }}>
+        The conductor will distribute a card shortly.
+      </p>
+      <div style={{ fontStyle: 'italic', marginTop: '20px' }}>
+        Connected as: {name}
+      </div>
+    </div>
+  );
+
+  // Show the active card or waiting state
+  // If timer is expired, show waiting state instead of expired card
+  if (!player.current_card || isTimerExpired) {
+    return renderWaitingState();
   }
 
-  if (error) {
-    return (
-      <div className="full-card">
-        <h3>Connection Error</h3>
-        <p style={{ margin: '15px 0' }}>{error}</p>
-        <button className="btn" onClick={() => onNavigate('join')}>
-          Try Again
-        </button>
-        {renderDebugInfo()}
-      </div>
-    );
-  }
-
-  if (sessionEnded) {
-    return (
-      <div className="full-card session-ended">
-        <h2 className="card-text">SESSION ENDED</h2>
-        <p>Thank you for participating!</p>
-        <button
-          className="btn"
-          onClick={() => onNavigate('home')}
-          style={{ marginTop: '20px' }}
-        >
-          Return to Home
-        </button>
-      </div>
-    );
-  }
-
-  if (!player) {
-    return (
-      <div className="full-card">
-        <h3>Connection Error</h3>
-        <p>Unable to find your player information</p>
-        <button className="btn" onClick={() => onNavigate('join')}>
-          Rejoin
-        </button>
-        {renderDebugInfo()}
-      </div>
-    );
-  }
-
-  // Waiting for card
-  if (!player.current_card) {
-    return (
-      <div className="full-card">
-        <h3>Waiting for card...</h3>
-        <div className="waiting-animation">
-          <div className="dot"></div>
-          <div className="dot"></div>
-          <div className="dot"></div>
-        </div>
-        <p style={{ margin: '15px 0' }}>
-          The conductor will distribute a card shortly.
-        </p>
-        <div style={{ fontStyle: 'italic', marginTop: '20px' }}>
-          Connected as: {name}
-        </div>
-        {renderDebugInfo()}
-      </div>
-    );
-  }
-
-  // Show the active card
+  // Show the active card (only if not expired)
   return (
     <div className="full-card">
       <div className={`card-content ${cardAnimating ? 'card-new' : ''}`}>
