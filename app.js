@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.2.0 (build 247)";
+const APP_VERSION = "2.3.0 (build 248)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -375,21 +375,22 @@ function ConductorView({ onNavigate }) {
       setLoading(true);
       setError('');
 
-      // Get the active deck
-      const activeDeck = decks.find(d => d.id === selectedDeck);
-
-      if (!activeDeck || !activeDeck.cards || activeDeck.cards.length === 0) {
+      // Get all available decks for random mode
+      let allDecks = decks;
+      let selectedDeckData = decks.find(d => d.id === selectedDeck);
+      
+      if (!selectedDeckData || !selectedDeckData.cards || selectedDeckData.cards.length === 0) {
         setError('Selected deck has no cards');
         setLoading(false);
         return;
       }
 
-      const cards = activeDeck.cards;
-      console.log(`[${APP_VERSION}] Distribution started: deck=${activeDeck.name}, mode=${distributionMode}, players=${players.length}`);
+      console.log(`[${APP_VERSION}] Distribution started: deck=${selectedDeckData.name}, mode=${distributionMode}, players=${players.length}`);
 
       // Distribute cards based on mode
       if (distributionMode === 'unison') {
         // Everyone gets the same card
+        const cards = selectedDeckData.cards;
         const randomIndex = Math.floor(Math.random() * cards.length);
         const selectedCard = cards[randomIndex];
         console.log(`[${APP_VERSION}] Unison mode: selected card "${selectedCard}"`);
@@ -406,8 +407,8 @@ function ConductorView({ onNavigate }) {
             await safeOperation(() =>
               room.collection('player').update(player.id, {
                 current_card: selectedCard,
-                current_deck_name: activeDeck.name,
-                current_deck_id: activeDeck.id,
+                current_deck_name: selectedDeckData.name,
+                current_deck_id: selectedDeckData.id,
                 card_start_time: new Date().toISOString(),
                 card_duration: randomDuration
               })
@@ -418,6 +419,7 @@ function ConductorView({ onNavigate }) {
         }
       } else if (distributionMode === 'unique') {
         // Each player gets a unique card if possible
+        const cards = selectedDeckData.cards;
         const shuffledCards = [...cards].sort(() => Math.random() - 0.5);
         console.log(`[${APP_VERSION}] Unique mode: shuffled ${shuffledCards.length} cards`);
 
@@ -436,8 +438,8 @@ function ConductorView({ onNavigate }) {
             await safeOperation(() =>
               room.collection('player').update(players[i].id, {
                 current_card: selectedCard,
-                current_deck_name: activeDeck.name,
-                current_deck_id: activeDeck.id,
+                current_deck_name: selectedDeckData.name,
+                current_deck_id: selectedDeckData.id,
                 card_start_time: new Date().toISOString(),
                 card_duration: randomDuration
               })
@@ -447,26 +449,48 @@ function ConductorView({ onNavigate }) {
           }
         }
       } else if (distributionMode === 'random') {
-        // Each player gets a random card (duplicates allowed)
-        console.log(`[${APP_VERSION}] Random mode: selecting from ${cards.length} cards`);
+        // Each player gets a random card from any available deck (duplicates allowed)
+        console.log(`[${APP_VERSION}] Random mode: selecting from all available decks`);
+        
+        // Create a combined list of all cards from all decks with deck info
+        const allCards = [];
+        decks.forEach(deck => {
+          if (deck.cards && deck.cards.length > 0) {
+            deck.cards.forEach(card => {
+              allCards.push({
+                text: card,
+                deck_name: deck.name,
+                deck_id: deck.id
+              });
+            });
+          }
+        });
+        
+        if (allCards.length === 0) {
+          setError('No cards available in any deck');
+          setLoading(false);
+          return;
+        }
+        
+        console.log(`[${APP_VERSION}] Random mode: combined ${allCards.length} cards from all decks`);
         
         for (const player of players) {
-          const randomIndex = Math.floor(Math.random() * cards.length);
-          const selectedCard = cards[randomIndex];
+          const randomIndex = Math.floor(Math.random() * allCards.length);
+          const selectedCardObj = allCards[randomIndex];
 
           // Generate random duration between min and max timer settings
           const randomDuration = Math.floor(
             Math.random() * (maxTimerSeconds - minTimerSeconds + 1) + minTimerSeconds
           );
 
-          console.log(`[${APP_VERSION}] Assigning random card "${selectedCard}" to ${player.name}, duration=${randomDuration}s`);
+          console.log(`[${APP_VERSION}] Assigning random card "${selectedCardObj.text}" from deck "${selectedCardObj.deck_name}" to ${player.name}, duration=${randomDuration}s`);
           
           try {
             await safeOperation(() =>
               room.collection('player').update(player.id, {
-                current_card: selectedCard,
-                current_deck_name: activeDeck.name,
-                current_deck_id: activeDeck.id,
+                current_card: selectedCardObj.text,
+                current_deck_name: selectedCardObj.deck_name,
+                current_deck_id: selectedCardObj.deck_id,
                 card_start_time: new Date().toISOString(),
                 card_duration: randomDuration
               })
@@ -1058,6 +1082,10 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
   const [sessionEnded, setSessionEnded] = useState(false);
   const [cardAnimating, setCardAnimating] = useState(false);
   const lastCardRef = useRef('');
+  const playerSubscriptionRef = useRef(null);
+  
+  // Debug state to show connection status
+  const [connectionStatus, setConnectionStatus] = useState('Connecting...');
 
   // Find player and subscribe to updates
   useEffect(() => {
@@ -1066,6 +1094,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     const findPlayer = async () => {
       try {
         console.log(`[${APP_VERSION}] Finding player: name=${name}, pin=${pin}, id=${playerId || 'unknown'}`);
+        setConnectionStatus(`Finding player record...`);
         
         let players;
         if (playerId) {
@@ -1075,11 +1104,13 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           );
           if (playerById.length > 0) {
             players = playerById;
+            setConnectionStatus(`Found player by ID`);
           }
         }
         
         // Fallback to finding by name and pin
         if (!players || players.length === 0) {
+          setConnectionStatus(`Searching by name and pin...`);
           players = await safeOperation(() =>
             room.collection('player')
               .filter({ name, session_pin: pin })
@@ -1089,11 +1120,13 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
 
         if (players.length === 0) {
           setError('Player not found');
+          setConnectionStatus(`Error: Player not found`);
           setLoading(false);
           return;
         }
 
         console.log(`[${APP_VERSION}] Player found:`, players[0]);
+        setConnectionStatus(`Connected as: ${players[0].name}`);
         setPlayer(players[0]);
 
         if (players[0].current_card === 'END') {
@@ -1103,6 +1136,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         setLoading(false);
       } catch (error) {
         setError('Error connecting to session');
+        setConnectionStatus(`Connection error: ${error.message}`);
         console.error('Error finding player:', error);
         setLoading(false);
       }
@@ -1110,58 +1144,102 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
 
     findPlayer();
 
-    // Subscribe to player updates - use player ID if available, otherwise use name and pin
-    let subscription;
-    try {
-      if (playerId) {
-        subscription = room.collection('player')
-          .filter({ id: playerId })
-          .subscribe(players => handlePlayerUpdate(players));
-        console.log(`[${APP_VERSION}] Subscribed to player updates by ID: ${playerId}`);
-      } else {
-        subscription = room.collection('player')
-          .filter({ name, session_pin: pin })
-          .subscribe(players => handlePlayerUpdate(players));
-        console.log(`[${APP_VERSION}] Subscribed to player updates by name/pin: ${name}/${pin}`);
+    // Set up subscription to player updates
+    const setupSubscription = () => {
+      // Clear existing subscription if any
+      if (playerSubscriptionRef.current) {
+        playerSubscriptionRef.current();
+        playerSubscriptionRef.current = null;
       }
-    } catch (err) {
-      console.error(`[${APP_VERSION}] Error setting up player subscription:`, err);
-      setError('Connection error. Please try rejoining.');
-    }
-
-    // Handle player updates
-    function handlePlayerUpdate(players) {
-      if (players.length > 0) {
-        console.log(`[${APP_VERSION}] Player update received:`, players[0]);
+      
+      try {
+        let filterParams = playerId 
+          ? { id: playerId }
+          : { name, session_pin: pin };
+          
+        console.log(`[${APP_VERSION}] Setting up player subscription with filter:`, filterParams);
         
-        // Check if card changed
-        if (lastCardRef.current !== players[0].current_card && players[0].current_card) {
-          setCardAnimating(true);
-          setTimeout(() => setCardAnimating(false), 500);
-        }
-        
-        lastCardRef.current = players[0].current_card;
-        setPlayer(players[0]);
+        const unsubscribe = room.collection('player')
+          .filter(filterParams)
+          .subscribe(players => {
+            if (players.length > 0) {
+              const updatedPlayer = players[0];
+              console.log(`[${APP_VERSION}] Player update received:`, updatedPlayer);
+              setConnectionStatus(`Connected: ${new Date().toLocaleTimeString()}`);
+              
+              // Check if card changed
+              if (lastCardRef.current !== updatedPlayer.current_card && updatedPlayer.current_card) {
+                console.log(`[${APP_VERSION}] Card changed from "${lastCardRef.current}" to "${updatedPlayer.current_card}"`);
+                setCardAnimating(true);
+                setTimeout(() => setCardAnimating(false), 500);
+              }
+              
+              lastCardRef.current = updatedPlayer.current_card;
+              setPlayer(updatedPlayer);
 
-        if (players[0].current_card === 'END') {
-          setSessionEnded(true);
-        }
-      }
-    }
-
-    return () => {
-      if (typeof subscription === 'function') {
-        subscription();
-        console.log(`[${APP_VERSION}] Player subscription cleared`);
+              if (updatedPlayer.current_card === 'END') {
+                setSessionEnded(true);
+              }
+            } else {
+              console.warn(`[${APP_VERSION}] Player subscription returned empty result`);
+              setConnectionStatus(`Warning: Subscription returned empty result`);
+            }
+          });
+          
+        playerSubscriptionRef.current = unsubscribe;
+        console.log(`[${APP_VERSION}] Player subscription established`);
+      } catch (err) {
+        console.error(`[${APP_VERSION}] Error setting up player subscription:`, err);
+        setConnectionStatus(`Subscription error: ${err.message}`);
+        setError('Connection error. Please try rejoining.');
       }
     };
+    
+    // Set up subscription and refresh it periodically to ensure it's working
+    setupSubscription();
+    
+    // Refresh subscription every 10 seconds to ensure we're getting updates
+    const refreshTimer = setInterval(() => {
+      console.log(`[${APP_VERSION}] Refreshing player subscription...`);
+      setupSubscription();
+    }, 10000);
+
+    return () => {
+      if (playerSubscriptionRef.current) {
+        playerSubscriptionRef.current();
+        playerSubscriptionRef.current = null;
+      }
+      clearInterval(refreshTimer);
+      console.log(`[${APP_VERSION}] Player subscription and refresh timer cleared`);
+    };
   }, [pin, name, playerId]);
+
+  // Debug UI for connection issues
+  const renderDebugInfo = () => {
+    if (!error && player) return null;
+    
+    return (
+      <div style={{ marginTop: '20px', fontSize: '12px', backgroundColor: 'rgba(0,0,0,0.05)', padding: '10px', borderRadius: '5px' }}>
+        <div>Status: {connectionStatus}</div>
+        <div>Last update: {new Date().toLocaleTimeString()}</div>
+        <button 
+          style={{ fontSize: '12px', marginTop: '5px', padding: '5px' }}
+          onClick={() => window.location.reload()}
+        >
+          Refresh Connection
+        </button>
+      </div>
+    );
+  };
 
   if (loading) {
     return (
       <div className="full-card">
         <div className="loading-spinner"></div>
         <div style={{ marginTop: '15px' }}>Connecting to session...</div>
+        <div style={{ fontSize: '14px', color: 'var(--text-light)', marginTop: '10px' }}>
+          {connectionStatus}
+        </div>
       </div>
     );
   }
@@ -1174,6 +1252,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         <button className="btn" onClick={() => onNavigate('join')}>
           Try Again
         </button>
+        {renderDebugInfo()}
       </div>
     );
   }
@@ -1202,6 +1281,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         <button className="btn" onClick={() => onNavigate('join')}>
           Rejoin
         </button>
+        {renderDebugInfo()}
       </div>
     );
   }
@@ -1222,6 +1302,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         <div style={{ fontStyle: 'italic', marginTop: '20px' }}>
           Connected as: {name}
         </div>
+        {renderDebugInfo()}
       </div>
     );
   }
@@ -1249,6 +1330,24 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       >
         Connected as: {name}
       </div>
+      
+      {/* Small debug button in corner for connection issues */}
+      <button 
+        onClick={() => window.location.reload()} 
+        style={{ 
+          position: 'absolute', 
+          bottom: '10px', 
+          right: '10px', 
+          fontSize: '12px', 
+          padding: '5px', 
+          background: 'transparent',
+          border: 'none',
+          color: 'var(--text-light)',
+          cursor: 'pointer'
+        }}
+      >
+        ↻
+      </button>
     </div>
   );
 }
