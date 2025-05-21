@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.10.0 (build 315)";
+const APP_VERSION = "2.11.0 (build 316)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -1258,15 +1258,619 @@ function ConductorView({ onNavigate }) {
   );
 }
 
+function PlayerView({ pin, name, playerId, onNavigate }) {
+  const [player, setPlayer] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [sessionEnded, setSessionEnded] = useState(false);
+  const [cardAnimating, setCardAnimating] = useState(false);
+  const lastCardRef = useRef('');
+  const playerSubscriptionRef = useRef(null);
+  const pollingIntervalRef = useRef(null);
+  
+  // Debug state to show connection status
+  const [connectionStatus, setConnectionStatus] = useState('Connecting...');
+  const [lastUpdateTime, setLastUpdateTime] = useState(Date.now());
+  const [connectionHealth, setConnectionHealth] = useState('connecting');
+  const reconnectAttemptRef = useRef(0);
+
+  // Track when a card is received
+  const [cardReceived, setCardReceived] = useState(false); 
+  const [clientStartTime, setClientStartTime] = useState(null); 
+  const [clientDuration, setClientDuration] = useState(null);
+  
+  // Track if timer is expired
+  const [isTimerExpired, setIsTimerExpired] = useState(false);
+  const cardExpiryTimerRef = useRef(null);
+  
+  // Keep track of last checked player data
+  const lastPlayerDataRef = useRef(null);
+  const acknowledgedCardRef = useRef(null);
+  const timerStartedRef = useRef(false);
+  
+  // Track card display state
+  const [displayCard, setDisplayCard] = useState(null);
+  const cardDisplayedTimeoutRef = useRef(null);
+  
+  // New state variable for tracking last distribution ID processed
+  const [lastProcessedDistribution, setLastProcessedDistribution] = useState(null);
+  
+  // Add timer lock to prevent premature timer expiry
+  const timerLockRef = useRef(false);
+  
+  // Force refresh player data function - defined early to be used in useEffect
+  const forceRefreshPlayerData = useCallback(async (isManualAttempt = false) => {
+    if (!playerId) return;
+    
+    try {
+      if (isManualAttempt) {
+        setConnectionStatus('Checking for new cards...');
+      }
+      
+      console.log(`[${APP_VERSION}] Force refreshing player data (attempt ${reconnectAttemptRef.current})`);
+      const playerData = await safeOperation(() => 
+        room.collection('player').filter({ id: playerId }).getList()
+      );
+      
+      if (playerData && playerData.length > 0) {
+        console.log(`[${APP_VERSION}] Forced refresh player data:`, playerData[0]);
+        
+        // Only process update if we're not in the middle of a timer
+        if (!timerLockRef.current || !displayCard) {
+          processPlayerUpdate(playerData[0]);
+        } else {
+          console.log(`[${APP_VERSION}] Skipping update during active timer`);
+        }
+        
+        // Signal readiness for a card if waiting and not in active timer
+        if ((!playerData[0].current_card || playerData[0].current_card === '') && !timerLockRef.current) {
+          try {
+            await safeOperation(() =>
+              room.collection('player').update(playerId, {
+                ready_for_card: true,
+                distribution_pending: false,
+                player_ready_on_join: true,
+                last_ready_signal: new Date().toISOString()
+              })
+            );
+            console.log(`[${APP_VERSION}] Sent ready_for_card signal in force refresh`);
+          } catch (e) {
+            console.error(`[${APP_VERSION}] Failed to send ready signal:`, e);
+          }
+        }
+        // If we have a card but the timer hasn't been acknowledged
+        else if (playerData[0].current_card && playerData[0].current_card !== '' && 
+                 playerData[0].current_card !== 'END' && 
+                 (!playerData[0].card_received || playerData[0].waiting_for_player_ack) &&
+                 !timerLockRef.current) {
+          try {
+            // Force acknowledge the card
+            const clientReceivedTime = new Date().toISOString();
+            await safeOperation(() => 
+              room.collection('player').update(playerId, {
+                card_received: true,
+                card_received_at: clientReceivedTime,
+                card_start_time: clientReceivedTime,
+                waiting_for_player_ack: false,
+                timer_started: true,
+                timer_start_ts: Date.now(),
+                card_acknowledged: true
+              })
+            );
+            console.log(`[${APP_VERSION}] Forced card acknowledgment in refresh`);
+          } catch (e) {
+            console.error(`[${APP_VERSION}] Failed to force acknowledge card:`, e);
+          }
+        }
+      } else {
+        console.error(`[${APP_VERSION}] Player not found in forced refresh`);
+        if (isManualAttempt) {
+          setConnectionStatus('Connected, but no new card available');
+          setTimeout(() => setConnectionStatus('Connected'), 2000);
+        }
+      }
+    } catch (err) {
+      console.error(`[${APP_VERSION}] Error in force refresh:`, err);
+      reconnectAttemptRef.current++;
+      setConnectionHealth('reconnecting');
+      setConnectionStatus(`Connection problem. Reconnecting (attempt ${reconnectAttemptRef.current})...`);
+    }
+  }, [playerId, displayCard]);
+
+  // Process player updates with improved card handling
+  const processPlayerUpdate = useCallback((updatedPlayer) => {
+    if (!updatedPlayer) return;
+    
+    setLastUpdateTime(Date.now());
+    setConnectionHealth('connected');
+    reconnectAttemptRef.current = 0;
+    
+    setPlayer(updatedPlayer);
+    setConnectionStatus('Connected');
+    setLoading(false);
+    
+    // Handle END session state
+    if (updatedPlayer.current_card === 'END') {
+      setSessionEnded(true);
+      setDisplayCard(null);
+      timerLockRef.current = false;
+      return;
+    }
+    
+    // If timer is active, don't process card updates
+    if (timerLockRef.current && displayCard && !isTimerExpired) {
+      console.log(`[${APP_VERSION}] Timer is active, ignoring card update`);
+      return;
+    }
+    
+    // Handle no card case - reset display state
+    if (!updatedPlayer.current_card) {
+      setDisplayCard(null);
+      setCardReceived(false);
+      setIsTimerExpired(false);
+      acknowledgedCardRef.current = null;
+      timerStartedRef.current = false;
+      timerLockRef.current = false;
+      
+      // Signal readiness for a card if waiting
+      if (!updatedPlayer.ready_for_card) {
+        try {
+          safeOperation(() => 
+            room.collection('player').update(updatedPlayer.id, {
+              ready_for_card: true,
+              last_ready_signal: new Date().toISOString()
+            })
+          );
+        } catch (e) {
+          console.error(`[${APP_VERSION}] Failed to set ready_for_card:`, e);
+        }
+      }
+      return;
+    }
+    
+    // Check if this is a new card distribution
+    const isNewDistribution = 
+      updatedPlayer.distribution_id && 
+      updatedPlayer.distribution_id !== lastProcessedDistribution;
+      
+    // If we've received a new card or haven't processed this distribution yet
+    if (isNewDistribution && updatedPlayer.current_card) {
+      console.log(`[${APP_VERSION}] New card distribution detected: "${updatedPlayer.current_card}" with ID ${updatedPlayer.distribution_id}`);
+      
+      // Update our tracking
+      setLastProcessedDistribution(updatedPlayer.distribution_id);
+      
+      // Clear any existing display state
+      setDisplayCard(null);
+      setIsTimerExpired(false);
+      setCardAnimating(false);
+      
+      // Clear any existing timeouts
+      if (cardDisplayedTimeoutRef.current) {
+        clearTimeout(cardDisplayedTimeoutRef.current);
+        cardDisplayedTimeoutRef.current = null;
+      }
+      
+      // Clear any existing expiry timer
+      if (cardExpiryTimerRef.current) {
+        clearTimeout(cardExpiryTimerRef.current);
+        cardExpiryTimerRef.current = null;
+      }
+      
+      // Set a short timeout to display the card - ensures a clean transition
+      cardDisplayedTimeoutRef.current = setTimeout(() => {
+        setDisplayCard(updatedPlayer.current_card);
+        setCardAnimating(true);
+        
+        // Set client-side start time to NOW, not when the server sent it
+        const clientReceivedTime = new Date().toISOString();
+        setClientStartTime(clientReceivedTime);
+        setClientDuration(updatedPlayer.card_duration);
+        setCardReceived(true);
+        
+        // Lock timer to prevent premature updates
+        timerLockRef.current = true;
+        
+        // Acknowledge to the server that we've received and displayed the card
+        try {
+          safeOperation(() => 
+            room.collection('player').update(updatedPlayer.id, {
+              card_received: true,
+              card_received_at: clientReceivedTime,
+              card_start_time: clientReceivedTime, // Set the actual start time
+              waiting_for_player_ack: false,
+              distribution_id_received: updatedPlayer.distribution_id,
+              ready_for_card: false,
+              timer_started: true,
+              timer_start_ts: Date.now(),
+              display_confirmed: true,
+              player_sync_timestamp: Date.now(),
+              timer_locked: true // New flag to indicate timer is locked
+            })
+          );
+          console.log(`[${APP_VERSION}] Acknowledged card receipt with start time: ${clientReceivedTime}`);
+          timerStartedRef.current = true;
+          acknowledgedCardRef.current = updatedPlayer.distribution_id;
+        } catch (e) {
+          console.error(`[${APP_VERSION}] Failed to acknowledge card receipt:`, e);
+        }
+        
+        setTimeout(() => setCardAnimating(false), 500);
+        lastCardRef.current = updatedPlayer.current_card;
+      }, 300);
+    } 
+    
+    lastPlayerDataRef.current = updatedPlayer;
+  }, [lastProcessedDistribution, displayCard, isTimerExpired]);
+
+  // Set up player subscription and polling for more reliable updates
+  useEffect(() => {
+    if (!playerId) {
+      console.error(`[${APP_VERSION}] No player ID provided`);
+      setError('No player identification found. Please rejoin the session.');
+      setLoading(false);
+      return;
+    }
+    
+    console.log(`[${APP_VERSION}] Setting up player subscription for ID: ${playerId}`);
+    setConnectionStatus('Connecting to server...');
+    
+    const fetchInitialPlayerData = async () => {
+      try {
+        const playerData = await safeOperation(() => 
+          room.collection('player').filter({ id: playerId }).getList()
+        );
+        
+        if (playerData && playerData.length > 0) {
+          console.log(`[${APP_VERSION}] Initial player data loaded:`, playerData[0]);
+          
+          processPlayerUpdate(playerData[0]);
+          
+          // If we don't have a card, send ready signal
+          if (!playerData[0].current_card || playerData[0].current_card === '') {
+            try {
+              await safeOperation(() =>
+                room.collection('player').update(playerId, {
+                  ready_for_card: true,
+                  distribution_pending: false,
+                  player_ready_on_join: true,
+                  last_ready_signal: new Date().toISOString()
+                })
+              );
+              console.log(`[${APP_VERSION}] Sent initial ready_for_card signal`);
+            } catch (e) {
+              console.error(`[${APP_VERSION}] Failed to send initial ready signal:`, e);
+            }
+          }
+        } else {
+          console.error(`[${APP_VERSION}] Player not found with ID: ${playerId}`);
+          setError('Player not found. You may need to rejoin the session.');
+          setLoading(false);
+        }
+      } catch (err) {
+        console.error(`[${APP_VERSION}] Error fetching initial player data:`, err);
+        setConnectionStatus('Connection error. Retrying...');
+        setTimeout(fetchInitialPlayerData, 1500); // Retry faster
+      }
+    };
+    
+    fetchInitialPlayerData();
+    
+    const setupSubscription = () => {
+      try {
+        if (playerSubscriptionRef.current) {
+          playerSubscriptionRef.current(); // Clear previous subscription
+        }
+        
+        console.log(`[${APP_VERSION}] Setting up new player subscription`);
+        
+        const unsubscribe = room.collection('player')
+          .filter({ id: playerId })
+          .subscribe((players) => {
+            if (players && players.length > 0) {
+              const updatedPlayer = players[0];
+              console.log(`[${APP_VERSION}] Player data updated via subscription:`, updatedPlayer);
+              
+              // Only process if not in active timer or if END signal
+              if (!timerLockRef.current || updatedPlayer.current_card === 'END' || !displayCard) {
+                processPlayerUpdate(updatedPlayer);
+              } else {
+                console.log(`[${APP_VERSION}] Ignoring subscription update during active timer`);
+              }
+            } else {
+              console.log(`[${APP_VERSION}] No player data in subscription update`);
+            }
+          });
+        
+        playerSubscriptionRef.current = unsubscribe;
+        console.log(`[${APP_VERSION}] Player subscription set up successfully`);
+      } catch (err) {
+        console.error(`[${APP_VERSION}] Error setting up player subscription:`, err);
+        setConnectionStatus('Subscription error. Using polling fallback...');
+        
+        // Retry subscription setup after a short delay
+        setTimeout(() => {
+          setupSubscription();
+        }, 2000);
+      }
+    };
+    
+    setupSubscription();
+    
+    // Set up polling as a fallback and additional reliability
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+    }
+    
+    pollingIntervalRef.current = setInterval(() => {
+      if (!sessionEnded && (!timerLockRef.current || !displayCard || isTimerExpired)) {
+        forceRefreshPlayerData();
+      }
+    }, 2000); // Poll every 2 seconds for non-timer states
+    
+    return () => {
+      if (playerSubscriptionRef.current) {
+        playerSubscriptionRef.current();
+        playerSubscriptionRef.current = null;
+      }
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+    };
+  }, [playerId, processPlayerUpdate, forceRefreshPlayerData, sessionEnded, displayCard, isTimerExpired]);
+
+  // Connection health check
+  useEffect(() => {
+    const healthCheckInterval = setInterval(() => {
+      const now = Date.now();
+      const timeSinceLastUpdate = now - lastUpdateTime;
+      
+      // If it's been more than 10 seconds since our last update and we're not in an active timer, force a refresh
+      if (timeSinceLastUpdate > 10000 && !sessionEnded && (!timerLockRef.current || !displayCard)) {
+        console.log(`[${APP_VERSION}] Connection health check: ${timeSinceLastUpdate}ms since last update`);
+        forceRefreshPlayerData();
+      }
+    }, 5000);
+    
+    return () => clearInterval(healthCheckInterval);
+  }, [lastUpdateTime, forceRefreshPlayerData, sessionEnded, displayCard]);
+
+  // Handle timer expiry with improved reliability
+  const handleTimerExpiry = useCallback(() => {
+    console.log(`[${APP_VERSION}] Card timer expired via timeout`);
+    
+    // Only handle expiry if not already expired and timer is active
+    if (!isTimerExpired && timerLockRef.current) {
+      setIsTimerExpired(true);
+      // Don't immediately clear the card, conductor needs to send a new one first
+      
+      // Unlock the timer to allow new cards
+      timerLockRef.current = false;
+      
+      try {
+        safeOperation(() => 
+          room.collection('player').update(playerId, {
+            ready_for_card: true,
+            last_card_expired_at: new Date().toISOString(),
+            current_card_status: 'expired',
+            timer_expired: true,
+            player_requesting_new_card: true,
+            timer_locked: false // Unlock on server side too
+          })
+        );
+        console.log(`[${APP_VERSION}] Sent card expiry notification to server`);
+        
+        // Wait 1 second before removing the display card
+        setTimeout(() => {
+          if (isTimerExpired) {
+            setDisplayCard(null);
+            setCardReceived(false);
+          }
+        }, 1000);
+      } catch (e) {
+        console.error(`[${APP_VERSION}] Failed to send expiry notification:`, e);
+      }
+      
+      // Force a refresh to get the next card if available
+      setTimeout(() => {
+        forceRefreshPlayerData(true);
+      }, 1500);
+    }
+  }, [playerId, forceRefreshPlayerData, isTimerExpired]);
+
+  // Setup timer for card expiry with absolute precision
+  useEffect(() => {
+    if (!clientStartTime || !clientDuration || !displayCard) {
+      return;
+    }
+    
+    if (cardExpiryTimerRef.current) {
+      clearTimeout(cardExpiryTimerRef.current);
+      cardExpiryTimerRef.current = null;
+    }
+    
+    const startTime = new Date(clientStartTime).getTime();
+    const duration = clientDuration * 1000;
+    const now = Date.now();
+    const endTime = startTime + duration;
+    
+    // For safety, check if already expired
+    if (now >= endTime) {
+      console.log(`[${APP_VERSION}] Card already expired at load time`);
+      handleTimerExpiry();
+      return;
+    }
+    
+    const timeLeft = Math.max(10, endTime - now); // Ensure at least 10ms buffer
+    
+    console.log(`[${APP_VERSION}] Setting timer expiry for ${timeLeft}ms (${timeLeft/1000}s) from now`);
+    
+    // Activate timer lock
+    timerLockRef.current = true;
+    
+    // Set precise timeout for timer expiry
+    cardExpiryTimerRef.current = setTimeout(() => {
+      handleTimerExpiry();
+    }, timeLeft);
+    
+    return () => {
+      if (cardExpiryTimerRef.current) {
+        clearTimeout(cardExpiryTimerRef.current);
+        cardExpiryTimerRef.current = null;
+      }
+    };
+  }, [clientStartTime, clientDuration, displayCard, handleTimerExpiry]);
+
+  if (loading) {
+    return (
+      <div className="full-card">
+        <h3>Connecting...</h3>
+        <div className="waiting-animation">
+          <div className="dot"></div>
+          <div className="dot"></div>
+          <div className="dot"></div>
+        </div>
+        <p style={{ margin: '15px 0' }}>
+          {connectionStatus}
+        </p>
+      </div>
+    );
+  }
+  
+  if (error) {
+    return (
+      <div className="full-card">
+        <h3>Error</h3>
+        <p style={{ margin: '15px 0', color: 'var(--error)' }}>
+          {error}
+        </p>
+        <button className="btn" onClick={() => window.location.reload()}>
+          Reload Page
+        </button>
+      </div>
+    );
+  }
+  
+  if (!player) {
+    return (
+      <div className="full-card">
+        <h3>Connecting to session...</h3>
+        <div className="waiting-animation">
+          <div className="dot"></div>
+          <div className="dot"></div>
+          <div className="dot"></div>
+        </div>
+      </div>
+    );
+  }
+  
+  if (sessionEnded || player.current_card === 'END') {
+    return (
+      <div className="full-card session-ended">
+        <h2 className="card-text">Session Ended</h2>
+        <p style={{ margin: '15px 0' }}>
+          Thank you for participating!
+        </p>
+        <button className="btn" onClick={() => onNavigate('home')}>
+          Return to Home
+        </button>
+      </div>
+    );
+  }
+
+  // Only show waiting screen if no display card and not in active timer 
+  if (!displayCard && !timerLockRef.current) {
+    return (
+      <div className="full-card">
+        <h3>Waiting for next card...</h3>
+        <div className="waiting-animation">
+          <div className="dot"></div>
+          <div className="dot"></div>
+          <div className="dot"></div>
+        </div>
+        <p style={{ margin: '15px 0' }}>
+          The conductor will distribute a card shortly.
+        </p>
+        <div style={{ fontStyle: 'italic', marginTop: '20px' }}>
+          Connected as: {name}
+        </div>
+        
+        <button 
+          onClick={() => forceRefreshPlayerData(true)} 
+          className="btn btn-outline"
+          style={{ marginTop: '15px', fontSize: '14px' }}
+        >
+          Check for new card
+        </button>
+        
+        <div style={{ 
+          fontSize: '12px', 
+          marginTop: '15px',
+          color: connectionHealth === 'connected' ? 'var(--success)' : 'var(--text-light)'
+        }}>
+          {connectionStatus}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="full-card">
+      <div className={`card-content ${cardAnimating ? 'card-new' : ''}`}>
+        <h2 className="card-text">{displayCard}</h2>
+
+        {clientStartTime && clientDuration ? (
+          <PlayerTimer
+            key={`${clientStartTime}-${clientDuration}`} // Key forces recreation of timer
+            startTime={clientStartTime}
+            duration={clientDuration}
+            syncRequired={false} // This is a client-side timer, already synced
+          />
+        ) : null}
+      </div>
+
+      <div
+        style={{
+          marginTop: '20px',
+          fontSize: '14px',
+          color: 'var(--text-light)'
+        }}
+      >
+        Connected as: {name}
+      </div>
+      
+      <button 
+        onClick={() => !timerLockRef.current && forceRefreshPlayerData(true)} 
+        style={{ 
+          position: 'absolute', 
+          bottom: '10px', 
+          right: '10px', 
+          fontSize: '12px', 
+          padding: '5px', 
+          background: 'transparent',
+          border: 'none',
+          color: 'var(--text-light)',
+          cursor: timerLockRef.current ? 'not-allowed' : 'pointer',
+          opacity: timerLockRef.current ? 0.5 : 1
+        }}
+      >
+        ↻
+      </button>
+    </div>
+  );
+}
+
 function PlayerTimer({ startTime, duration, syncRequired }) {
   const [timeLeft, setTimeLeft] = useState(duration);
   const [isExpired, setIsExpired] = useState(false);
   const [percentage, setPercentage] = useState(100);
   const timerIntervalRef = useRef(null);
   
-  // Store original values as refs
+  // Store original values as refs to prevent unexpected updates
   const startTimeRef = useRef(new Date(startTime).getTime());
   const durationRef = useRef(duration);
+  const timerCompletedRef = useRef(false);
   
   useEffect(() => {
     console.log(`[${APP_VERSION}] PlayerTimer mounted with duration=${duration}s, startTime=${startTime}`);
@@ -1274,6 +1878,7 @@ function PlayerTimer({ startTime, duration, syncRequired }) {
     // Update refs with new values
     startTimeRef.current = new Date(startTime).getTime();
     durationRef.current = duration;
+    timerCompletedRef.current = false;
     
     // Initialize with full duration
     setTimeLeft(duration);
@@ -1287,16 +1892,23 @@ function PlayerTimer({ startTime, duration, syncRequired }) {
     }
     
     const updateTimer = () => {
+      if (timerCompletedRef.current) return;
+      
       const now = Date.now();
       const end = startTimeRef.current + (durationRef.current * 1000);
       const remaining = Math.max(0, Math.ceil((end - now) / 1000));
-      const newPercentage = Math.min(100, Math.max(0, (remaining / durationRef.current) * 100));
+      
+      // Calculate percentage precisely to ensure smooth progression from 100 to 0
+      const elapsedMs = now - startTimeRef.current;
+      const durationMs = durationRef.current * 1000;
+      const newPercentage = Math.max(0, Math.min(100, 100 - (elapsedMs / durationMs * 100)));
       
       setTimeLeft(remaining);
       setPercentage(newPercentage);
       
       if (remaining <= 0 && !isExpired) {
         setIsExpired(true);
+        timerCompletedRef.current = true;
         console.log(`[${APP_VERSION}] Timer expired in PlayerTimer component`);
         
         // Clear interval when expired
@@ -1310,8 +1922,8 @@ function PlayerTimer({ startTime, duration, syncRequired }) {
     // Initial update
     updateTimer();
     
-    // Set up interval for updates
-    timerIntervalRef.current = setInterval(updateTimer, 200); // More frequent updates for smoother countdown
+    // Set up interval for updates - use a faster update for smoother animation
+    timerIntervalRef.current = setInterval(updateTimer, 100);
 
     return () => {
       if (timerIntervalRef.current) {
@@ -1439,552 +2051,6 @@ function JoinView({ onNavigate, initialPin }) {
           Back to Home
         </button>
       </div>
-    </div>
-  );
-}
-
-function PlayerView({ pin, name, playerId, onNavigate }) {
-  const [player, setPlayer] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [sessionEnded, setSessionEnded] = useState(false);
-  const [cardAnimating, setCardAnimating] = useState(false);
-  const lastCardRef = useRef('');
-  const playerSubscriptionRef = useRef(null);
-  const pollingIntervalRef = useRef(null);
-  
-  // Debug state to show connection status
-  const [connectionStatus, setConnectionStatus] = useState('Connecting...');
-  const [lastUpdateTime, setLastUpdateTime] = useState(Date.now());
-  const [connectionHealth, setConnectionHealth] = useState('connecting');
-  const reconnectAttemptRef = useRef(0);
-
-  // Track when a card is received
-  const [cardReceived, setCardReceived] = useState(false); 
-  const [clientStartTime, setClientStartTime] = useState(null); 
-  const [clientDuration, setClientDuration] = useState(null);
-  
-  // Track if timer is expired
-  const [isTimerExpired, setIsTimerExpired] = useState(false);
-  const cardExpiryTimerRef = useRef(null);
-  
-  // Keep track of last checked player data
-  const lastPlayerDataRef = useRef(null);
-  const acknowledgedCardRef = useRef(null);
-  const timerStartedRef = useRef(false);
-  
-  // Track card display state
-  const [displayCard, setDisplayCard] = useState(null);
-  const cardDisplayedTimeoutRef = useRef(null);
-  
-  // New state variable for tracking last distribution ID processed
-  const [lastProcessedDistribution, setLastProcessedDistribution] = useState(null);
-  
-  // Force refresh player data function - defined early to be used in useEffect
-  const forceRefreshPlayerData = useCallback(async (isManualAttempt = false) => {
-    if (!playerId) return;
-    
-    try {
-      if (isManualAttempt) {
-        setConnectionStatus('Checking for new cards...');
-      }
-      
-      console.log(`[${APP_VERSION}] Force refreshing player data (attempt ${reconnectAttemptRef.current})`);
-      const playerData = await safeOperation(() => 
-        room.collection('player').filter({ id: playerId }).getList()
-      );
-      
-      if (playerData && playerData.length > 0) {
-        console.log(`[${APP_VERSION}] Forced refresh player data:`, playerData[0]);
-        
-        processPlayerUpdate(playerData[0]);
-        
-        // Signal readiness for a card if waiting
-        if (!playerData[0].current_card || playerData[0].current_card === '') {
-          try {
-            await safeOperation(() =>
-              room.collection('player').update(playerId, {
-                ready_for_card: true,
-                distribution_pending: false,
-                player_ready_on_join: true,
-                last_ready_signal: new Date().toISOString()
-              })
-            );
-            console.log(`[${APP_VERSION}] Sent ready_for_card signal in force refresh`);
-          } catch (e) {
-            console.error(`[${APP_VERSION}] Failed to send ready signal:`, e);
-          }
-        }
-        // If we have a card but the timer hasn't been acknowledged
-        else if (playerData[0].current_card && playerData[0].current_card !== '' && 
-                 playerData[0].current_card !== 'END' && 
-                 (!playerData[0].card_received || playerData[0].waiting_for_player_ack)) {
-          try {
-            // Force acknowledge the card
-            const clientReceivedTime = new Date().toISOString();
-            await safeOperation(() => 
-              room.collection('player').update(playerId, {
-                card_received: true,
-                card_received_at: clientReceivedTime,
-                card_start_time: clientReceivedTime,
-                waiting_for_player_ack: false,
-                timer_started: true,
-                timer_start_ts: Date.now(),
-                card_acknowledged: true
-              })
-            );
-            console.log(`[${APP_VERSION}] Forced card acknowledgment in refresh`);
-          } catch (e) {
-            console.error(`[${APP_VERSION}] Failed to force acknowledge card:`, e);
-          }
-        }
-      } else {
-        console.error(`[${APP_VERSION}] Player not found in forced refresh`);
-        if (isManualAttempt) {
-          setConnectionStatus('Connected, but no new card available');
-          setTimeout(() => setConnectionStatus('Connected'), 2000);
-        }
-      }
-    } catch (err) {
-      console.error(`[${APP_VERSION}] Error in force refresh:`, err);
-      reconnectAttemptRef.current++;
-      setConnectionHealth('reconnecting');
-      setConnectionStatus(`Connection problem. Reconnecting (attempt ${reconnectAttemptRef.current})...`);
-    }
-  }, [playerId]);
-
-  // Process player updates with improved card handling
-  const processPlayerUpdate = useCallback((updatedPlayer) => {
-    if (!updatedPlayer) return;
-    
-    setLastUpdateTime(Date.now());
-    setConnectionHealth('connected');
-    reconnectAttemptRef.current = 0;
-    
-    setPlayer(updatedPlayer);
-    setConnectionStatus('Connected');
-    setLoading(false);
-    
-    // Handle END session state
-    if (updatedPlayer.current_card === 'END') {
-      setSessionEnded(true);
-      setDisplayCard(null);
-      return;
-    }
-    
-    // Handle no card case - reset display state
-    if (!updatedPlayer.current_card) {
-      setDisplayCard(null);
-      setCardReceived(false);
-      setIsTimerExpired(false);
-      acknowledgedCardRef.current = null;
-      timerStartedRef.current = false;
-      
-      // Signal readiness for a card if waiting
-      if (!updatedPlayer.ready_for_card) {
-        try {
-          safeOperation(() => 
-            room.collection('player').update(updatedPlayer.id, {
-              ready_for_card: true,
-              last_ready_signal: new Date().toISOString()
-            })
-          );
-        } catch (e) {
-          console.error(`[${APP_VERSION}] Failed to set ready_for_card:`, e);
-        }
-      }
-      return;
-    }
-    
-    // Check if this is a new card distribution
-    const isNewDistribution = 
-      updatedPlayer.distribution_id && 
-      updatedPlayer.distribution_id !== lastProcessedDistribution;
-      
-    // If we've received a new card or haven't processed this distribution yet
-    if (isNewDistribution && updatedPlayer.current_card) {
-      console.log(`[${APP_VERSION}] New card distribution detected: "${updatedPlayer.current_card}" with ID ${updatedPlayer.distribution_id}`);
-      
-      // Update our tracking
-      setLastProcessedDistribution(updatedPlayer.distribution_id);
-      
-      // Clear any existing display state
-      setDisplayCard(null);
-      setIsTimerExpired(false);
-      setCardAnimating(false);
-      
-      // Clear any existing timeouts
-      if (cardDisplayedTimeoutRef.current) {
-        clearTimeout(cardDisplayedTimeoutRef.current);
-        cardDisplayedTimeoutRef.current = null;
-      }
-      
-      // Set a short timeout to display the card - ensures a clean transition
-      cardDisplayedTimeoutRef.current = setTimeout(() => {
-        setDisplayCard(updatedPlayer.current_card);
-        setCardAnimating(true);
-        
-        // Set client-side start time to NOW, not when the server sent it
-        const clientReceivedTime = new Date().toISOString();
-        setClientStartTime(clientReceivedTime);
-        setClientDuration(updatedPlayer.card_duration);
-        setCardReceived(true);
-        
-        // Acknowledge to the server that we've received and displayed the card
-        try {
-          safeOperation(() => 
-            room.collection('player').update(updatedPlayer.id, {
-              card_received: true,
-              card_received_at: clientReceivedTime,
-              card_start_time: clientReceivedTime, // Set the actual start time
-              waiting_for_player_ack: false,
-              distribution_id_received: updatedPlayer.distribution_id,
-              ready_for_card: false,
-              timer_started: true,
-              timer_start_ts: Date.now(),
-              display_confirmed: true,
-              player_sync_timestamp: Date.now()
-            })
-          );
-          console.log(`[${APP_VERSION}] Acknowledged card receipt with start time: ${clientReceivedTime}`);
-          timerStartedRef.current = true;
-          acknowledgedCardRef.current = updatedPlayer.distribution_id;
-        } catch (e) {
-          console.error(`[${APP_VERSION}] Failed to acknowledge card receipt:`, e);
-        }
-        
-        setTimeout(() => setCardAnimating(false), 500);
-        lastCardRef.current = updatedPlayer.current_card;
-      }, 300);
-    } 
-    
-    lastPlayerDataRef.current = updatedPlayer;
-  }, [lastProcessedDistribution]);
-
-  // Set up player subscription and polling for more reliable updates
-  useEffect(() => {
-    if (!playerId) {
-      console.error(`[${APP_VERSION}] No player ID provided`);
-      setError('No player identification found. Please rejoin the session.');
-      setLoading(false);
-      return;
-    }
-    
-    console.log(`[${APP_VERSION}] Setting up player subscription for ID: ${playerId}`);
-    setConnectionStatus('Connecting to server...');
-    
-    const fetchInitialPlayerData = async () => {
-      try {
-        const playerData = await safeOperation(() => 
-          room.collection('player').filter({ id: playerId }).getList()
-        );
-        
-        if (playerData && playerData.length > 0) {
-          console.log(`[${APP_VERSION}] Initial player data loaded:`, playerData[0]);
-          
-          processPlayerUpdate(playerData[0]);
-          
-          // If we don't have a card, send ready signal
-          if (!playerData[0].current_card || playerData[0].current_card === '') {
-            try {
-              await safeOperation(() =>
-                room.collection('player').update(playerId, {
-                  ready_for_card: true,
-                  distribution_pending: false,
-                  player_ready_on_join: true,
-                  last_ready_signal: new Date().toISOString()
-                })
-              );
-              console.log(`[${APP_VERSION}] Sent initial ready_for_card signal`);
-            } catch (e) {
-              console.error(`[${APP_VERSION}] Failed to send initial ready signal:`, e);
-            }
-          }
-        } else {
-          console.error(`[${APP_VERSION}] Player not found with ID: ${playerId}`);
-          setError('Player not found. You may need to rejoin the session.');
-          setLoading(false);
-        }
-      } catch (err) {
-        console.error(`[${APP_VERSION}] Error fetching initial player data:`, err);
-        setConnectionStatus('Connection error. Retrying...');
-        setTimeout(fetchInitialPlayerData, 1500); // Retry faster
-      }
-    };
-    
-    fetchInitialPlayerData();
-    
-    const setupSubscription = () => {
-      try {
-        if (playerSubscriptionRef.current) {
-          playerSubscriptionRef.current(); // Clear previous subscription
-        }
-        
-        console.log(`[${APP_VERSION}] Setting up new player subscription`);
-        
-        const unsubscribe = room.collection('player')
-          .filter({ id: playerId })
-          .subscribe((players) => {
-            if (players && players.length > 0) {
-              const updatedPlayer = players[0];
-              console.log(`[${APP_VERSION}] Player data updated via subscription:`, updatedPlayer);
-              processPlayerUpdate(updatedPlayer);
-            } else {
-              console.log(`[${APP_VERSION}] No player data in subscription update`);
-            }
-          });
-        
-        playerSubscriptionRef.current = unsubscribe;
-        console.log(`[${APP_VERSION}] Player subscription set up successfully`);
-      } catch (err) {
-        console.error(`[${APP_VERSION}] Error setting up player subscription:`, err);
-        setConnectionStatus('Subscription error. Using polling fallback...');
-        
-        // Retry subscription setup after a short delay
-        setTimeout(() => {
-          setupSubscription();
-        }, 2000);
-      }
-    };
-    
-    setupSubscription();
-    
-    // Set up polling as a fallback and additional reliability
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
-    }
-    
-    pollingIntervalRef.current = setInterval(() => {
-      if (!sessionEnded) {
-        forceRefreshPlayerData();
-      }
-    }, 2000); // Poll every 2 seconds regardless of state for reliability
-    
-    return () => {
-      if (playerSubscriptionRef.current) {
-        playerSubscriptionRef.current();
-        playerSubscriptionRef.current = null;
-      }
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-        pollingIntervalRef.current = null;
-      }
-    };
-  }, [playerId, processPlayerUpdate, forceRefreshPlayerData, sessionEnded]);
-
-  // Connection health check
-  useEffect(() => {
-    const healthCheckInterval = setInterval(() => {
-      const now = Date.now();
-      const timeSinceLastUpdate = now - lastUpdateTime;
-      
-      // If it's been more than 10 seconds since our last update, force a refresh
-      if (timeSinceLastUpdate > 10000 && !sessionEnded) {
-        console.log(`[${APP_VERSION}] Connection health check: ${timeSinceLastUpdate}ms since last update`);
-        forceRefreshPlayerData();
-      }
-    }, 5000);
-    
-    return () => clearInterval(healthCheckInterval);
-  }, [lastUpdateTime, forceRefreshPlayerData, sessionEnded]);
-
-  // Handle timer expiry
-  const handleTimerExpiry = useCallback(() => {
-    console.log(`[${APP_VERSION}] Card timer expired via timeout`);
-    setIsTimerExpired(true);
-    setCardReceived(false);
-    setDisplayCard(null); // Remove the card immediately
-    
-    try {
-      safeOperation(() => 
-        room.collection('player').update(playerId, {
-          ready_for_card: true,
-          last_card_expired_at: new Date().toISOString(),
-          current_card_status: 'expired',
-          current_card: '', // Clear the card immediately on server
-          timer_expired: true,
-          player_requesting_new_card: true
-        })
-      );
-      console.log(`[${APP_VERSION}] Sent card expiry notification to server`);
-    } catch (e) {
-      console.error(`[${APP_VERSION}] Failed to send expiry notification:`, e);
-    }
-    
-    // Force a refresh to get the next card if available
-    forceRefreshPlayerData(true);
-  }, [playerId, forceRefreshPlayerData]);
-
-  // Setup timer for card expiry
-  useEffect(() => {
-    if (!clientStartTime || !clientDuration || !displayCard) {
-      return;
-    }
-    
-    if (cardExpiryTimerRef.current) {
-      clearTimeout(cardExpiryTimerRef.current);
-      cardExpiryTimerRef.current = null;
-    }
-    
-    const startTime = new Date(clientStartTime).getTime();
-    const duration = clientDuration * 1000;
-    const now = Date.now();
-    const endTime = startTime + duration;
-    const isExpired = now > endTime;
-    
-    if (isExpired) {
-      console.log(`[${APP_VERSION}] Card already expired`);
-      handleTimerExpiry();
-      return;
-    }
-    
-    const timeLeft = Math.max(0, endTime - now);
-    
-    console.log(`[${APP_VERSION}] Setting timer expiry for ${timeLeft}ms from now`);
-    
-    cardExpiryTimerRef.current = setTimeout(handleTimerExpiry, timeLeft);
-    
-    return () => {
-      if (cardExpiryTimerRef.current) {
-        clearTimeout(cardExpiryTimerRef.current);
-        cardExpiryTimerRef.current = null;
-      }
-    };
-  }, [clientStartTime, clientDuration, displayCard, handleTimerExpiry]);
-
-  if (loading) {
-    return (
-      <div className="full-card">
-        <h3>Connecting...</h3>
-        <div className="waiting-animation">
-          <div className="dot"></div>
-          <div className="dot"></div>
-          <div className="dot"></div>
-        </div>
-        <p style={{ margin: '15px 0' }}>
-          {connectionStatus}
-        </p>
-      </div>
-    );
-  }
-  
-  if (error) {
-    return (
-      <div className="full-card">
-        <h3>Error</h3>
-        <p style={{ margin: '15px 0', color: 'var(--error)' }}>
-          {error}
-        </p>
-        <button className="btn" onClick={() => window.location.reload()}>
-          Reload Page
-        </button>
-      </div>
-    );
-  }
-  
-  if (!player) {
-    return (
-      <div className="full-card">
-        <h3>Connecting to session...</h3>
-        <div className="waiting-animation">
-          <div className="dot"></div>
-          <div className="dot"></div>
-          <div className="dot"></div>
-        </div>
-      </div>
-    );
-  }
-  
-  if (sessionEnded || player.current_card === 'END') {
-    return (
-      <div className="full-card session-ended">
-        <h2 className="card-text">Session Ended</h2>
-        <p style={{ margin: '15px 0' }}>
-          Thank you for participating!
-        </p>
-        <button className="btn" onClick={() => onNavigate('home')}>
-          Return to Home
-        </button>
-      </div>
-    );
-  }
-
-  if (!displayCard || isTimerExpired) {
-    return (
-      <div className="full-card">
-        <h3>Waiting for next card...</h3>
-        <div className="waiting-animation">
-          <div className="dot"></div>
-          <div className="dot"></div>
-          <div className="dot"></div>
-        </div>
-        <p style={{ margin: '15px 0' }}>
-          The conductor will distribute a card shortly.
-        </p>
-        <div style={{ fontStyle: 'italic', marginTop: '20px' }}>
-          Connected as: {name}
-        </div>
-        
-        <button 
-          onClick={() => forceRefreshPlayerData(true)} 
-          className="btn btn-outline"
-          style={{ marginTop: '15px', fontSize: '14px' }}
-        >
-          Check for new card
-        </button>
-        
-        <div style={{ 
-          fontSize: '12px', 
-          marginTop: '15px',
-          color: connectionHealth === 'connected' ? 'var(--success)' : 'var(--text-light)'
-        }}>
-          {connectionStatus}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="full-card">
-      <div className={`card-content ${cardAnimating ? 'card-new' : ''}`}>
-        <h2 className="card-text">{displayCard}</h2>
-
-        {clientStartTime && clientDuration ? (
-          <PlayerTimer
-            key={`${clientStartTime}-${clientDuration}`} // Key forces recreation of timer
-            startTime={clientStartTime}
-            duration={clientDuration}
-            syncRequired={false} // This is a client-side timer, already synced
-          />
-        ) : null}
-      </div>
-
-      <div
-        style={{
-          marginTop: '20px',
-          fontSize: '14px',
-          color: 'var(--text-light)'
-        }}
-      >
-        Connected as: {name}
-      </div>
-      
-      <button 
-        onClick={() => forceRefreshPlayerData(true)} 
-        style={{ 
-          position: 'absolute', 
-          bottom: '10px', 
-          right: '10px', 
-          fontSize: '12px', 
-          padding: '5px', 
-          background: 'transparent',
-          border: 'none',
-          color: 'var(--text-light)',
-          cursor: 'pointer'
-        }}
-      >
-        ↻
-      </button>
     </div>
   );
 }
