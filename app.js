@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.6.0 (build 301)";
+const APP_VERSION = "2.7.0 (build 302)";
 
 const { useState, useEffect, useRef, useCallback, useSyncExternalStore } = React;
 const { createRoot } = ReactDOM;
@@ -436,7 +436,92 @@ function ConductorView({ onNavigate }) {
     };
   }, [pin, setupPlayerSubscription]);
 
-  // Distribute cards to a single player
+  // Auto-distribute cards to players with expired timers or stuck players
+  useEffect(() => {
+    // Clean up previous interval
+    if (autoDistributeIntervalRef.current) {
+      clearInterval(autoDistributeIntervalRef.current);
+      autoDistributeIntervalRef.current = null;
+    }
+    
+    // Set up new interval if in session and auto-distribute is enabled
+    if (step === 'session' && autoDistribute && players.length > 0) {
+      console.log(`[${APP_VERSION}] Starting auto-distribution interval`);
+      
+      autoDistributeIntervalRef.current = setInterval(async () => {
+        // Check for players with expired cards or stuck in distribution
+        const now = Date.now();
+        
+        // Force refresh player list to ensure we have the latest state
+        try {
+          const updatedPlayers = await safeOperation(() =>
+            room.collection('player').filter({ session_pin: pin }).getList()
+          );
+          if (updatedPlayers && updatedPlayers.length > 0) {
+            setPlayers(updatedPlayers);
+          }
+        } catch (err) {
+          console.error(`[${APP_VERSION}] Error refreshing players in auto-distribute:`, err);
+        }
+        
+        const playersNeedingCards = players.filter(player => {
+          // Skip players without cards or with END signal
+          if (!player.current_card || player.current_card === 'END') {
+            return true; // New players or players who just joined need cards
+          }
+          
+          // Check for stuck distribution
+          if (player.distribution_pending === true) {
+            const lastAttemptTime = player.last_distribution_attempt || player.card_start_time;
+            if (lastAttemptTime) {
+              const timeSinceAttempt = now - new Date(lastAttemptTime).getTime();
+              // If it's been more than 5 seconds since we tried to distribute a card
+              if (timeSinceAttempt > 5000) return true;
+            }
+          }
+          
+          // Check if player has explicitly requested a new card
+          if (player.ready_for_card === true) {
+            return true;
+          }
+          
+          // Check if card timer has expired
+          if (!player.card_start_time || !player.card_duration) {
+            return true; // Something's wrong with the timer
+          }
+          
+          const cardStartTime = new Date(player.card_start_time).getTime();
+          const cardEndTime = cardStartTime + (player.card_duration * 1000);
+          
+          return now > cardEndTime; // Card has expired
+        });
+        
+        // Distribute new cards to players who need them
+        if (playersNeedingCards.length > 0) {
+          console.log(`[${APP_VERSION}] Auto-distributing cards to ${playersNeedingCards.length} players:`, 
+            playersNeedingCards.map(p => p.name).join(', '));
+          
+          for (const player of playersNeedingCards) {
+            await distributeCardToPlayer(player);
+            // Small delay between distributions to avoid overwhelming server
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
+          
+          // Force refresh player list to show updated cards
+          setTimeout(refreshPlayerList, 1000);
+        }
+      }, 2000); // Check every 2 seconds for better responsiveness
+    }
+    
+    return () => {
+      if (autoDistributeIntervalRef.current) {
+        clearInterval(autoDistributeIntervalRef.current);
+        autoDistributeIntervalRef.current = null;
+      }
+    };
+  }, [step, autoDistribute, players, selectedDeck, distributionMode, minTimerSeconds, maxTimerSeconds, pin]);
+
+  // Distribute cards to a single player - improved for reliability
   const distributeCardToPlayer = async (player) => {
     if (!sessionId || !selectedDeck) {
       console.log(`[${APP_VERSION}] Cannot distribute: missing session or deck`);
@@ -449,20 +534,7 @@ function ConductorView({ onNavigate }) {
       // Generate a unique distribution ID to track this specific card distribution
       const distributionId = `dist_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
       
-      // First, clear current card to indicate loading state to the player
-      await safeOperation(() =>
-        room.collection('player').update(player.id, {
-          current_card: '', // This will trigger loading state on player's side
-          distribution_pending: true, // Flag to indicate distribution is in progress
-          distribution_attempt: (player.distribution_attempt || 0) + 1,
-          distribution_id: distributionId // Add a unique ID for this distribution
-        })
-      );
-      
-      // Increased wait time to ensure client processes card clearing
-      await new Promise(resolve => setTimeout(resolve, 300));
-      
-      // Get selected deck info
+      // Get selected deck info before clearing the current card
       let selectedDeckData = decks.find(d => d.id === selectedDeck);
       
       if (!selectedDeckData || !selectedDeckData.cards || selectedDeckData.cards.length === 0) {
@@ -558,11 +630,25 @@ function ConductorView({ onNavigate }) {
         console.log(`[${APP_VERSION}] Random mode: selected card "${selectedCard}" from deck "${selectedDeckName}" for ${player.name}`);
       }
 
+      // First, clear current card to indicate loading state to the player
+      await safeOperation(() =>
+        room.collection('player').update(player.id, {
+          current_card: '', // This will trigger loading state on player's side
+          distribution_pending: true, // Flag to indicate distribution is in progress
+          distribution_attempt: (player.distribution_attempt || 0) + 1,
+          last_distribution_attempt: new Date().toISOString(),
+          distribution_id: distributionId // Add a unique ID for this distribution
+        })
+      );
+      
       // Use current time as the start time to ensure timer starts fresh
       const currentTime = new Date().toISOString();
       
+      // Small delay to ensure client sees the cleared state
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
       // Update the player with their new card and a fresh timestamp
-      await safeOperation(() =>
+      const updateResult = await safeOperation(() =>
         room.collection('player').update(player.id, {
           current_card: selectedCard,
           current_deck_name: selectedDeckName,
@@ -577,6 +663,28 @@ function ConductorView({ onNavigate }) {
       );
       
       console.log(`[${APP_VERSION}] Card distributed to ${player.name}, duration=${randomDuration}s, id=${distributionId}`);
+      
+      // Update the local player list to reflect the change
+      setPlayers(prevPlayers => {
+        return prevPlayers.map(p => {
+          if (p.id === player.id) {
+            return {
+              ...p,
+              current_card: selectedCard,
+              current_deck_name: selectedDeckName,
+              current_deck_id: selectedDeckId,
+              card_start_time: currentTime,
+              card_duration: randomDuration,
+              distribution_pending: false,
+              distribution_id: distributionId,
+              last_successful_distribution: currentTime,
+              ready_for_card: false
+            };
+          }
+          return p;
+        });
+      });
+      
       return true;
     } catch (error) {
       console.error(`[${APP_VERSION}] Error distributing card to ${player.name}:`, error);
@@ -593,78 +701,6 @@ function ConductorView({ onNavigate }) {
       return false;
     }
   };
-
-  // Auto-distribute cards to players with expired timers or stuck players
-  useEffect(() => {
-    // Clean up previous interval
-    if (autoDistributeIntervalRef.current) {
-      clearInterval(autoDistributeIntervalRef.current);
-      autoDistributeIntervalRef.current = null;
-    }
-    
-    // Set up new interval if in session and auto-distribute is enabled
-    if (step === 'session' && autoDistribute && players.length > 0) {
-      console.log(`[${APP_VERSION}] Starting auto-distribution interval`);
-      
-      autoDistributeIntervalRef.current = setInterval(async () => {
-        // Check for players with expired cards or stuck in distribution
-        const now = Date.now();
-        const playersNeedingCards = players.filter(player => {
-          // Skip players without cards or with END signal
-          if (!player.current_card || player.current_card === 'END') {
-            return true; // New players or players who just joined need cards
-          }
-          
-          // Check for stuck distribution
-          if (player.distribution_pending === true) {
-            const lastAttemptTime = player.last_distribution_attempt || player.card_start_time;
-            if (lastAttemptTime) {
-              const timeSinceAttempt = now - new Date(lastAttemptTime).getTime();
-              // If it's been more than 10 seconds since we tried to distribute a card
-              if (timeSinceAttempt > 10000) return true;
-            }
-          }
-          
-          // Check if player has explicitly requested a new card
-          if (player.ready_for_card === true) {
-            return true;
-          }
-          
-          // Check if card timer has expired
-          if (!player.card_start_time || !player.card_duration) {
-            return true; // Something's wrong with the timer
-          }
-          
-          const cardStartTime = new Date(player.card_start_time).getTime();
-          const cardEndTime = cardStartTime + (player.card_duration * 1000);
-          
-          return now > cardEndTime; // Card has expired
-        });
-        
-        // Distribute new cards to players who need them
-        if (playersNeedingCards.length > 0) {
-          console.log(`[${APP_VERSION}] Auto-distributing cards to ${playersNeedingCards.length} players:`, 
-            playersNeedingCards.map(p => p.name).join(', '));
-          
-          for (const player of playersNeedingCards) {
-            await distributeCardToPlayer(player);
-            // Small delay between distributions to avoid overwhelming server
-            await new Promise(resolve => setTimeout(resolve, 300));
-          }
-          
-          // Force refresh player list to show updated cards
-          setTimeout(refreshPlayerList, 1000);
-        }
-      }, 3000); // Check every 3 seconds for better responsiveness
-    }
-    
-    return () => {
-      if (autoDistributeIntervalRef.current) {
-        clearInterval(autoDistributeIntervalRef.current);
-        autoDistributeIntervalRef.current = null;
-      }
-    };
-  }, [step, autoDistribute, players, selectedDeck, distributionMode, minTimerSeconds, maxTimerSeconds]);
 
   if (step === 'setup') {
     return (
@@ -1214,46 +1250,43 @@ function ConductorView({ onNavigate }) {
 function PlayerTimer({ startTime, duration }) {
   const [timeLeft, setTimeLeft] = useState(duration);
   const [isExpired, setIsExpired] = useState(false);
+  const [percentage, setPercentage] = useState(100);
   const timerIntervalRef = useRef(null);
   
-  // Store original values to ensure consistent animation
-  const originalStartTimeRef = useRef(new Date(startTime).getTime());
-  const originalDurationRef = useRef(duration);
+  // Store original values as refs
+  const startTimeRef = useRef(new Date(startTime).getTime());
+  const durationRef = useRef(duration);
   
-  // Track if this is the initial render
-  const isInitialRender = useRef(true);
-
   useEffect(() => {
-    console.log(`[${APP_VERSION}] PlayerTimer mounted/updated: duration=${duration}s, startTime=${startTime}`);
+    console.log(`[${APP_VERSION}] PlayerTimer mounted with duration=${duration}s, startTime=${startTime}`);
     
-    // Always reset these values when the component is created or updated
-    originalStartTimeRef.current = new Date(startTime).getTime();
-    originalDurationRef.current = duration;
+    // Update refs with new values
+    startTimeRef.current = new Date(startTime).getTime();
+    durationRef.current = duration;
     
-    // Set initial state for timer display
-    if (isInitialRender.current) {
-      setTimeLeft(duration);
-      isInitialRender.current = false;
-    }
-    
+    // Initialize with full duration
+    setTimeLeft(duration);
+    setPercentage(100);
     setIsExpired(false);
     
     // Clear any existing interval
     if (timerIntervalRef.current) {
       clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
     }
     
-    const end = originalStartTimeRef.current + (duration * 1000);
-
     const updateTimer = () => {
       const now = Date.now();
+      const end = startTimeRef.current + (durationRef.current * 1000);
       const remaining = Math.max(0, Math.ceil((end - now) / 1000));
+      const newPercentage = Math.min(100, Math.max(0, (remaining / durationRef.current) * 100));
       
       setTimeLeft(remaining);
+      setPercentage(newPercentage);
       
-      if (remaining === 0 && !isExpired) {
+      if (remaining <= 0 && !isExpired) {
         setIsExpired(true);
-        console.log(`[${APP_VERSION}] Timer expired`);
+        console.log(`[${APP_VERSION}] Timer expired in PlayerTimer component`);
         
         // Clear interval when expired
         if (timerIntervalRef.current) {
@@ -1263,23 +1296,19 @@ function PlayerTimer({ startTime, duration }) {
       }
     };
 
-    // Immediately call once to initialize correctly
+    // Initial update
     updateTimer();
     
-    // Set up interval and store reference - use a faster interval for smoother updates
+    // Set up interval for updates
     timerIntervalRef.current = setInterval(updateTimer, 500);
 
     return () => {
-      console.log(`[${APP_VERSION}] PlayerTimer unmounting - cleaning up timer`);
       if (timerIntervalRef.current) {
         clearInterval(timerIntervalRef.current);
         timerIntervalRef.current = null;
       }
     };
-  }, [startTime, duration]); // This will reset when either changes
-
-  // Calculate percentage of time remaining - always between 0 and 100
-  const percentage = Math.min(100, Math.max(0, (timeLeft / originalDurationRef.current) * 100));
+  }, [startTime, duration]);
 
   return (
     <div style={{ marginTop: '8px' }}>
@@ -1482,7 +1511,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       clearInterval(pollingIntervalRef.current);
     }
     
-    const pollingInterval = (!cardReceived || connectionHealth !== 'connected') ? 2000 : 5000;
+    const pollingInterval = (!cardReceived || connectionHealth !== 'connected') ? 1500 : 3000;
     
     console.log(`[${APP_VERSION}] Setting up polling with interval: ${pollingInterval}ms`);
     
@@ -1529,7 +1558,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       } catch (err) {
         console.error(`[${APP_VERSION}] Error fetching initial player data:`, err);
         setConnectionStatus('Connection error. Retrying...');
-        setTimeout(fetchInitialPlayerData, 2000); // Retry after 2 seconds
+        setTimeout(fetchInitialPlayerData, 1500); // Retry faster
       }
     };
     
@@ -1561,9 +1590,10 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         console.error(`[${APP_VERSION}] Error setting up player subscription:`, err);
         setConnectionStatus('Subscription error. Using polling fallback...');
         
+        // Retry subscription setup after a short delay
         setTimeout(() => {
           setupSubscription();
-        }, 3000);
+        }, 2000);
       }
     };
     
@@ -1601,8 +1631,8 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     
     const hasActiveCard = updatedPlayer.current_card && updatedPlayer.current_card !== '';
     
-    if (hasActiveCard && isNewDistribution) {
-      console.log(`[${APP_VERSION}] New card received via distribution ${updatedPlayer.distribution_id}: "${updatedPlayer.current_card}"`);
+    if (hasActiveCard && (isNewDistribution || (!lastPlayerDataRef.current?.current_card && lastCardRef.current !== updatedPlayer.current_card))) {
+      console.log(`[${APP_VERSION}] New card received: "${updatedPlayer.current_card}"`);
       setCardReceived(true);
       setCardAnimating(true);
       setIsTimerExpired(false);
@@ -1631,18 +1661,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       setCardReceived(false);
       lastCardRef.current = '';
     }
-    else if (hasActiveCard && !lastPlayerDataRef.current?.current_card && lastCardRef.current !== updatedPlayer.current_card) {
-      console.log(`[${APP_VERSION}] Card received without distribution ID: "${updatedPlayer.current_card}"`);
-      setCardReceived(true);
-      setCardAnimating(true);
-      setIsTimerExpired(false);
-      
-      setClientStartTime(new Date().toISOString());
-      setClientDuration(updatedPlayer.card_duration);
-      
-      setTimeout(() => setCardAnimating(false), 500);
-      lastCardRef.current = updatedPlayer.current_card;
-    }
     
     lastPlayerDataRef.current = updatedPlayer;
   }, []);
@@ -1664,6 +1682,22 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         console.log(`[${APP_VERSION}] Forced refresh player data:`, playerData[0]);
         
         processPlayerUpdate(playerData[0]);
+        
+        // If we're in a stuck state, try to signal we're ready for a new card
+        if (!playerData[0].current_card || playerData[0].current_card === '') {
+          try {
+            await safeOperation(() =>
+              room.collection('player').update(playerId, {
+                ready_for_card: true,
+                distribution_pending: false,
+                last_ready_signal: new Date().toISOString()
+              })
+            );
+            console.log(`[${APP_VERSION}] Sent ready_for_card signal in force refresh`);
+          } catch (e) {
+            console.error(`[${APP_VERSION}] Failed to send ready signal:`, e);
+          }
+        }
       } else {
         console.error(`[${APP_VERSION}] Player not found in forced refresh`);
         if (isManualAttempt) {
@@ -1677,8 +1711,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       setConnectionHealth('reconnecting');
       setConnectionStatus(`Connection problem. Reconnecting (attempt ${reconnectAttemptRef.current})...`);
     }
-  }, [playerId]);
+  }, [playerId, processPlayerUpdate]);
 
+  // Updated timer expiry effect
   useEffect(() => {
     if (!player || !player.current_card || player.current_card === 'END' || player.current_card === '') {
       return;
@@ -1703,6 +1738,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     if (isExpired) {
       console.log(`[${APP_VERSION}] Card already expired`);
       setIsTimerExpired(true);
+      setCardReceived(false);
       
       try {
         safeOperation(() => 
@@ -1730,7 +1766,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     cardExpiryTimerRef.current = setTimeout(() => {
       console.log(`[${APP_VERSION}] Card timer expired via timeout`);
       setIsTimerExpired(true);
-      
       setCardReceived(false);
       
       try {
@@ -1738,7 +1773,8 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           room.collection('player').update(playerId, {
             ready_for_card: true,
             last_card_expired_at: new Date().toISOString(),
-            current_card_status: 'expired'
+            current_card_status: 'expired',
+            current_card: '' // Clear the card immediately on client side
           })
         );
         console.log(`[${APP_VERSION}] Sent card expiry notification to server`);
