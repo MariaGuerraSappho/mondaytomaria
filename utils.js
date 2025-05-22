@@ -93,8 +93,7 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
         console.log(`[${APP_VERSION}] No unique cards available, selected: ${selectedCard}`);
       }
     } else if (distributionMode === 'random') {
-      // Get all cards from all decks
-      // For simplicity here, we're just using the provided deck
+      // For random mode, just pick a random card from the deck
       const cards = deckData.cards;
       const randomIndex = Math.floor(Math.random() * cards.length);
       selectedCard = cards[randomIndex];
@@ -104,20 +103,9 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
     // Log the card and update details
     console.log(`[${APP_VERSION}] Sending card to player ${player.id}: "${selectedCard}" (${selectedDeckName}) for ${randomDuration}s`);
     
-    // Update the player record with the new card - improved reliability
+    // FIXED: Update player record with new card - direct write to avoid race conditions
     try {
-      // First update to clear any old card and set waiting state
-      await safeOperation(() =>
-        room.collection('player').update(player.id, {
-          waiting_for_player_ack: true,
-          distribution_id: distributionId,
-        })
-      );
-      
-      // Small delay to ensure first update is processed
-      await new Promise(resolve => setTimeout(resolve, 300));
-      
-      // Then send the actual card data
+      // Send the actual card data in a single update for better reliability
       await safeOperation(() =>
         room.collection('player').update(player.id, {
           current_card: selectedCard,
@@ -126,14 +114,26 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
           card_duration: randomDuration,
           distribution_id: distributionId,
           card_start_time: new Date().toISOString(),
-          card_received: true,
+          card_received: false, // Will be set to true by player when received
           ready_for_card: false,
           waiting_for_player_ack: false,
-          force_render: Date.now(),
+          // Add a random value to force updates to be detected
+          force_update: Math.random()
         })
       );
       
       console.log(`[${APP_VERSION}] Card successfully sent to player ${player.id}`);
+      
+      // Verify the update was successful by reading back the player record
+      const updatedPlayer = await safeOperation(() => 
+        room.collection('player')
+          .filter({ id: player.id })
+          .getList()
+      );
+      
+      if (updatedPlayer.length > 0) {
+        console.log(`[${APP_VERSION}] Verified player record update:`, updatedPlayer[0]);
+      }
     } catch (updateError) {
       console.error(`[${APP_VERSION}] Failed to update player with card:`, updateError);
       throw updateError;

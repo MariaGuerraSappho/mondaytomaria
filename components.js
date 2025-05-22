@@ -245,7 +245,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     }
   };
 
-  // IMPROVED: Handle card display with better debugging
+  // FIXED: Handle card display with better debugging and reliability
   const handleCardDisplay = (playerData) => {
     console.log(`[${APP_VERSION}] Processing card update for player:`, playerData);
     
@@ -292,6 +292,12 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     
     setTimeLeft(secondsRemaining);
     setWaitingForCard(false);
+    
+    // Send acknowledgment that card was received and displayed
+    updatePlayerStatus({ 
+      card_received: true,
+      card_acknowledged_at: new Date().toISOString()
+    });
     
     if (remaining > 0) {
       setTimerStarted(true);
@@ -370,11 +376,12 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           playerData = players[0];
           playerRef.current = playerData;
           
-          // Mark player as active
+          // Mark player as active and ready for cards
           await updatePlayerStatus({
             active: true,
             last_seen: new Date().toISOString(),
-            view_initialized: true
+            view_initialized: true,
+            ready_for_card: true
           });
         } catch (playerError) {
           console.error(`[${APP_VERSION}] Error getting player data:`, playerError);
@@ -383,19 +390,25 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           return;
         }
         
-        // IMPROVED: Display the card immediately if we have one
-        console.log(`[${APP_VERSION}] Initial player data:`, playerData);
+        // FIXED: Process initial card data immediately
         if (playerData.current_card) {
           console.log(`[${APP_VERSION}] Found initial card: ${playerData.current_card}`);
           handleCardDisplay(playerData);
         } else {
           console.log(`[${APP_VERSION}] No initial card found, waiting for card`);
           setWaitingForCard(true);
-          updatePlayerStatus({ ready_for_card: true });
+          await updatePlayerStatus({ ready_for_card: true });
         }
         
-        // IMPROVED: Set up more reliable subscription for player updates
+        // FIXED: Set up more reliable subscription for player updates
         console.log(`[${APP_VERSION}] Setting up player subscription for id: ${playerId}`);
+        
+        // Clear any existing subscription
+        if (playerSubscriptionRef.current) {
+          playerSubscriptionRef.current();
+        }
+        
+        // Create a direct subscription to the player record
         const unsubscribe = room.collection('player')
           .filter({ id: playerId })
           .subscribe(updatedPlayers => {
@@ -405,26 +418,20 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             }
             
             const updatedPlayer = updatedPlayers[0];
-            console.log(`[${APP_VERSION}] Subscription update received:`, updatedPlayer);
+            console.log(`[${APP_VERSION}] Player subscription update received:`, updatedPlayer);
+            
+            // Store the latest player data
             playerRef.current = updatedPlayer;
             
             // Process card updates
-            if (updatedPlayer.current_card) {
-              console.log(`[${APP_VERSION}] Subscription: Processing card: ${updatedPlayer.current_card}`);
-              handleCardDisplay(updatedPlayer);
-            } else {
-              console.log(`[${APP_VERSION}] Subscription: No card in update`);
-              if (!card) {
-                setWaitingForCard(true);
-              }
-            }
+            handleCardDisplay(updatedPlayer);
           });
         
         playerSubscriptionRef.current = unsubscribe;
         
         // Heartbeat to keep player active
-        const heartbeatInterval = setInterval(() => {
-          updatePlayerStatus({ 
+        const heartbeatInterval = setInterval(async () => {
+          await updatePlayerStatus({ 
             ping: Date.now(),
             player_active: true
           });
@@ -1570,6 +1577,3 @@ function ConductorView({ onNavigate }) {
     </div>
   );
 }
-
-// Note: improvedDistributeCard function is not defined in the given code. 
-// Please define it according to your requirements.
