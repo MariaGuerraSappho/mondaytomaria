@@ -606,23 +606,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     };
   }, [pin, name, playerId]);
 
-  const requestNewCard = async () => {
-    if (loading || !playerId) return;
-    
-    try {
-      console.log(`[${APP_VERSION}] Player manually requesting new card`);
-      await updatePlayerStatus({
-        ready_for_card: true,
-        manually_requested: true,
-        request_time: new Date().toISOString()
-      });
-      
-      setWaitingForCard(true);
-    } catch (error) {
-      console.error(`[${APP_VERSION}] Error requesting new card:`, error);
-    }
-  };
-
   return (
     <div className="container">
       <div className={`card ${card && card.isEnd ? 'session-ended' : ''}`}>
@@ -657,14 +640,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
                   <div className="dot"></div>
                   <div className="dot"></div>
                 </div>
-                
-                <button 
-                  className="btn btn-outline"
-                  onClick={requestNewCard}
-                  style={{ marginTop: '15px' }}
-                >
-                  Request Card
-                </button>
               </div>
             ) : (
               <div className={`card-content ${card !== null ? 'card-new' : ''}`}>
@@ -690,16 +665,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
                         <div style={{ textAlign: 'center', fontSize: '18px', fontWeight: 'bold' }}>
                           {timeLeft} seconds
                         </div>
-                        
-                        {timeLeft === 0 && (
-                          <button 
-                            className="btn btn-action"
-                            onClick={requestNewCard}
-                            style={{ marginTop: '15px' }}
-                          >
-                            Next Card
-                          </button>
-                        )}
                       </>
                     )}
                   </>
@@ -1929,12 +1894,6 @@ function ConductorView({ onNavigate }) {
                 ) : (
                   <div className="player-card-waiting">Waiting for card</div>
                 )}
-                <button 
-                  className="player-action-btn"
-                  onClick={() => distributeCardToPlayer(player)}
-                >
-                  Send Card
-                </button>
               </div>
             ))}
           </div>
