@@ -1,5 +1,5 @@
 // Constants for the application
-const APP_VERSION = "2.20.0 (build 330)";
+const APP_VERSION = "2.21.0 (build 335)";
 
 // Initialize WebsimSocket
 let room;
@@ -36,9 +36,11 @@ const safeOperation = async (operation, retries = 3) => {
   throw lastError || new Error('Operation failed');
 };
 
-// Improved card distribution function with extra reliability
+// Improved card distribution function with better reliability
 const improvedDistributeCard = async (player, deckData, distributionMode, players, minTimerSeconds, maxTimerSeconds) => {
   try {
+    console.log(`[${APP_VERSION}] Distributing card to player ${player.id} (${player.name})`);
+    
     // Generate a unique distribution ID
     const distributionId = `dist_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
     
@@ -64,11 +66,13 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
         selectedCard = activeUnison.current_card;
         selectedDeckName = activeUnison.current_deck_name;
         selectedDeckId = activeUnison.current_deck_id;
+        console.log(`[${APP_VERSION}] Using unison card: ${selectedCard}`);
       } else {
         // Select a new card for everyone
         const cards = deckData.cards;
         const randomIndex = Math.floor(Math.random() * cards.length);
         selectedCard = cards[randomIndex];
+        console.log(`[${APP_VERSION}] Selected new unison card: ${selectedCard}`);
       }
     } else if (distributionMode === 'unique') {
       // Find a card that no other player currently has
@@ -82,9 +86,11 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
       if (availableCards.length > 0) {
         const randomIndex = Math.floor(Math.random() * availableCards.length);
         selectedCard = availableCards[randomIndex];
+        console.log(`[${APP_VERSION}] Selected unique card: ${selectedCard}`);
       } else {
         const randomIndex = Math.floor(Math.random() * cards.length);
         selectedCard = cards[randomIndex];
+        console.log(`[${APP_VERSION}] No unique cards available, selected: ${selectedCard}`);
       }
     } else if (distributionMode === 'random') {
       // Get all cards from all decks
@@ -92,23 +98,46 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
       const cards = deckData.cards;
       const randomIndex = Math.floor(Math.random() * cards.length);
       selectedCard = cards[randomIndex];
+      console.log(`[${APP_VERSION}] Selected random card: ${selectedCard}`);
     }
     
-    // SIMPLIFIED: Send the card directly without clearing first
-    await safeOperation(() =>
-      room.collection('player').update(player.id, {
-        current_card: selectedCard,
-        current_deck_name: selectedDeckName,
-        current_deck_id: selectedDeckId,
-        card_duration: randomDuration,
-        distribution_id: distributionId,
-        card_start_time: new Date().toISOString(),
-        card_received: true,
-        ready_for_card: false,
-        waiting_for_player_ack: false,
-        force_render: Date.now(),
-      })
-    );
+    // Log the card and update details
+    console.log(`[${APP_VERSION}] Sending card to player ${player.id}: "${selectedCard}" (${selectedDeckName}) for ${randomDuration}s`);
+    
+    // Update the player record with the new card - improved reliability
+    try {
+      // First update to clear any old card and set waiting state
+      await safeOperation(() =>
+        room.collection('player').update(player.id, {
+          waiting_for_player_ack: true,
+          distribution_id: distributionId,
+        })
+      );
+      
+      // Small delay to ensure first update is processed
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Then send the actual card data
+      await safeOperation(() =>
+        room.collection('player').update(player.id, {
+          current_card: selectedCard,
+          current_deck_name: selectedDeckName,
+          current_deck_id: selectedDeckId,
+          card_duration: randomDuration,
+          distribution_id: distributionId,
+          card_start_time: new Date().toISOString(),
+          card_received: true,
+          ready_for_card: false,
+          waiting_for_player_ack: false,
+          force_render: Date.now(),
+        })
+      );
+      
+      console.log(`[${APP_VERSION}] Card successfully sent to player ${player.id}`);
+    } catch (updateError) {
+      console.error(`[${APP_VERSION}] Failed to update player with card:`, updateError);
+      throw updateError;
+    }
     
     return {
       success: true,
@@ -118,7 +147,7 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
       duration: randomDuration
     };
   } catch (error) {
-    console.error(`Error distributing card:`, error);
+    console.error(`[${APP_VERSION}] Error distributing card:`, error);
     return { success: false, error };
   }
 };

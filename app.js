@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.20.0 (build 330)";
+const APP_VERSION = "2.21.0 (build 335)";
 
 const { useState, useEffect } = React;
 const { createRoot } = ReactDOM;
@@ -24,12 +24,15 @@ function App() {
     if (loadingElement) {
       loadingElement.style.display = 'none';
     }
+    
+    console.log(`[${APP_VERSION}] App initialized, checking URL parameters`);
 
     try {
       const params = new URLSearchParams(window.location.search);
       const pinParam = params.get('pin');
 
       if (pinParam) {
+        console.log(`[${APP_VERSION}] Found PIN in URL: ${pinParam}`);
         setPlayerData(prev => ({ ...prev, pin: pinParam }));
         setView('join');
       }
@@ -39,6 +42,7 @@ function App() {
   }, []);
 
   const handleNavigate = (to, data = {}) => {
+    console.log(`[${APP_VERSION}] Navigating to: ${to}`, data);
     if (to === 'player' && data.pin && data.name) {
       setPlayerData({ 
         pin: data.pin, 
