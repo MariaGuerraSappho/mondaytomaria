@@ -232,25 +232,21 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
   const playerUpdateIntervalRef = useRef(null);
   const playerSubscriptionRef = useRef(null);
   const cardReceivedCheckerRef = useRef(null);
-  const waitingAcknowledgedRef = useRef(false);
-  const lastCardUpdateTimeRef = useRef(0);
 
+  // Simplified update player status function
   const updatePlayerStatus = async (statusUpdate) => {
     if (!playerId) return;
     
     try {
       console.log(`[${APP_VERSION}] Updating player status:`, statusUpdate);
-      await safeOperation(() => 
-        room.collection('player').update(playerId, {
-          ...statusUpdate,
-          last_seen: new Date().toISOString()
-        })
-      );
+      await room.collection('player').update(playerId, {
+        ...statusUpdate,
+        last_seen: new Date().toISOString()
+      });
       console.log(`[${APP_VERSION}] Player status updated successfully`);
       return true;
     } catch (error) {
       console.error(`[${APP_VERSION}] Error updating player status:`, error);
-      // Retry once after a small delay
       try {
         await new Promise(resolve => setTimeout(resolve, 500));
         await room.collection('player').update(playerId, {
@@ -267,6 +263,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     }
   };
 
+  // Simplified and more robust card handling
   const handleNewCard = async (newCardData) => {
     console.log(`[${APP_VERSION}] Processing new card:`, newCardData);
     
@@ -285,29 +282,24 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       distributionId: newCardData.distribution_id
     };
     
-    // Acknowledge receipt only if this is a new distribution ID
-    if (acknowledgedDistributionIdRef.current !== newCardData.distribution_id) {
-      console.log(`[${APP_VERSION}] Acknowledging new card with distribution ID: ${newCardData.distribution_id}`);
-      acknowledgedDistributionIdRef.current = newCardData.distribution_id;
-      cardReceivedRef.current = true;
-      waitingAcknowledgedRef.current = false;
-      lastCardUpdateTimeRef.current = Date.now();
-      
-      // Update server that we've received the card
-      await updatePlayerStatus({
-        waiting_for_player_ack: false,
-        card_received: true,
-        card_start_time: new Date().toISOString(),
-        ready_for_card: false,
-        card_acknowledge_time: new Date().toISOString()
-      });
-    }
-    
-    // Update the UI
+    // Update the UI first to show the card immediately
     setCard(newCard);
     setTimeLeft(newCard.duration);
     setWaitingForCard(false);
     setTimerStarted(true);
+    
+    // Acknowledge receipt of the card
+    acknowledgedDistributionIdRef.current = newCardData.distribution_id;
+    cardReceivedRef.current = true;
+    
+    // Update server that we've received the card
+    await updatePlayerStatus({
+      waiting_for_player_ack: false,
+      card_received: true,
+      card_start_time: new Date().toISOString(),
+      ready_for_card: false,
+      card_acknowledge_time: new Date().toISOString()
+    });
     
     // Start a new timer for this card
     timerRef.current = setInterval(() => {
@@ -344,11 +336,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         console.log(`[${APP_VERSION}] Initializing player view for player ${name} (${playerId}) in session ${pin}`);
         
         // Get session data
-        const sessions = await safeOperation(() => 
-          room.collection('session')
-            .filter({ pin })
-            .getList()
-        );
+        const sessions = await room.collection('session')
+          .filter({ pin })
+          .getList();
         
         if (sessions.length === 0) {
           setError('Session not found');
@@ -369,11 +359,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         // Check if player exists
         let playerData;
         try {
-          const players = await safeOperation(() => 
-            room.collection('player')
-              .filter({ id: playerId })
-              .getList()
-          );
+          const players = await room.collection('player')
+            .filter({ id: playerId })
+            .getList();
           
           if (players.length === 0) {
             setError('Player not found. Please rejoin the session.');
@@ -397,13 +385,14 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           return;
         }
         
+        console.log(`[${APP_VERSION}] Player data loaded:`, playerData);
+        
         // Check if player already has a card
         if (playerData.current_card && playerData.current_card !== 'END') {
           console.log(`[${APP_VERSION}] Player already has card: ${playerData.current_card}`);
           
-          // Acknowledge that we've received this card to ensure conductor knows
+          // Acknowledge card and update UI
           acknowledgedDistributionIdRef.current = playerData.distribution_id;
-          lastCardUpdateTimeRef.current = Date.now();
           
           await updatePlayerStatus({
             waiting_for_player_ack: false,
@@ -412,14 +401,15 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             card_acknowledge_time: new Date().toISOString()
           });
           
-          setCard({
+          const newCard = {
             text: playerData.current_card,
             deckName: playerData.current_deck_name || 'Unknown',
             startTime: playerData.card_start_time ? new Date(playerData.card_start_time) : new Date(),
             duration: playerData.card_duration || 30,
             distributionId: playerData.distribution_id
-          });
+          };
           
+          setCard(newCard);
           setWaitingForCard(false);
           
           // Calculate time left
@@ -428,7 +418,10 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             const endTime = startTime + (playerData.card_duration * 1000);
             const now = Date.now();
             const remaining = Math.max(0, endTime - now);
-            setTimeLeft(Math.ceil(remaining / 1000));
+            const secondsRemaining = Math.ceil(remaining / 1000);
+            
+            console.log(`[${APP_VERSION}] Time remaining for card: ${secondsRemaining} seconds`);
+            setTimeLeft(secondsRemaining);
             
             // If there's still time left, start the timer
             if (remaining > 0) {
@@ -479,7 +472,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           console.log(`[${APP_VERSION}] Player ready for first card`);
         }
         
-        // Set up subscription for player updates - store reference for cleanup
+        // Set up subscription for player updates with simplified logic
         const unsubscribe = room.collection('player')
           .filter({ id: playerId })
           .subscribe(updatedPlayers => {
@@ -495,36 +488,30 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
               ready_for_card: updatedPlayer.ready_for_card
             });
             
-            // Check if this is a stale update (older than our last processed update)
-            if (updatedPlayer.force_render && updatedPlayer.force_render < lastCardUpdateTimeRef.current) {
-              console.log(`[${APP_VERSION}] Ignoring stale update with force_render:`, updatedPlayer.force_render);
-              return;
-            }
-            
-            // Handle new card
-            if (updatedPlayer.current_card && 
-                updatedPlayer.current_card !== 'END' && 
-                (!card || card.text !== updatedPlayer.current_card || 
-                 (updatedPlayer.distribution_id && acknowledgedDistributionIdRef.current !== updatedPlayer.distribution_id))) {
-              
-              console.log(`[${APP_VERSION}] New card received: ${updatedPlayer.current_card}`);
-              handleNewCard(updatedPlayer);
-            }
-            
-            // Handle session end signal
-            else if (updatedPlayer.current_card === 'END') {
-              if (timerRef.current) {
-                clearInterval(timerRef.current);
-                timerRef.current = null;
+            // Simplified card handling logic
+            if (updatedPlayer.current_card) {
+              if (updatedPlayer.current_card === 'END') {
+                // Handle session end signal
+                if (timerRef.current) {
+                  clearInterval(timerRef.current);
+                  timerRef.current = null;
+                }
+                
+                setCard({ text: 'Session Ended', isEnd: true });
+                setWaitingForCard(false);
+                setTimerStarted(false);
+              } 
+              // Check if this is a new card (different text or new distribution ID)
+              else if (!card || 
+                      card.text !== updatedPlayer.current_card || 
+                      card.distributionId !== updatedPlayer.distribution_id) {
+                
+                console.log(`[${APP_VERSION}] New card detected: ${updatedPlayer.current_card}`);
+                handleNewCard(updatedPlayer);
               }
-              
-              setCard({ text: 'Session Ended', isEnd: true });
-              setWaitingForCard(false);
-              setTimerStarted(false);
             }
           });
         
-        // Store the unsubscribe function for cleanup
         playerSubscriptionRef.current = unsubscribe;
         
         // Start a heartbeat interval to update our presence
@@ -536,32 +523,28 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           });
         }, 10000);
         
-        // Set up a checker to make sure we acknowledge cards quickly
+        // Set up a checker to make sure cards are acknowledged quickly
         cardReceivedCheckerRef.current = setInterval(() => {
           const player = playerRef.current;
           
-          if (player && player.waiting_for_player_ack && !waitingAcknowledgedRef.current) {
+          if (player && player.waiting_for_player_ack && player.current_card && player.current_card !== 'END') {
             console.log(`[${APP_VERSION}] Acknowledging waiting card: ${player.current_card}`);
-            waitingAcknowledgedRef.current = true;
-            lastCardUpdateTimeRef.current = Date.now();
             
             // If we have a current card but haven't acknowledged it yet
-            if (player.current_card && player.current_card !== 'END') {
-              updatePlayerStatus({
-                waiting_for_player_ack: false,
-                card_received: true,
-                card_start_time: new Date().toISOString(),
-                ready_for_card: false,
-                card_acknowledge_time: new Date().toISOString()
-              });
-              
-              // If we need to update the UI too
-              if (!card || card.text !== player.current_card) {
-                handleNewCard(player);
-              }
+            updatePlayerStatus({
+              waiting_for_player_ack: false,
+              card_received: true,
+              card_start_time: new Date().toISOString(),
+              ready_for_card: false,
+              card_acknowledge_time: new Date().toISOString()
+            });
+            
+            // Update UI if needed
+            if (!card || card.text !== player.current_card) {
+              handleNewCard(player);
             }
           }
-        }, CARD_RECEIVED_CHECK_INTERVAL);
+        }, 500); // Check more frequently
         
         setLoading(false);
       } catch (error) {
@@ -590,7 +573,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         cardReceivedCheckerRef.current = null;
       }
       
-      // Clean up player subscription
       if (playerSubscriptionRef.current) {
         playerSubscriptionRef.current();
         playerSubscriptionRef.current = null;
@@ -967,9 +949,6 @@ function ConductorView({ onNavigate }) {
                 archived: false
               })
             );
-            
-            setDecks(prevDecks => [deck, ...prevDecks]);
-            setSelectedDeck(deck.id);
             successCount = 1;
           } catch (err) {
             errorCount = 1;
