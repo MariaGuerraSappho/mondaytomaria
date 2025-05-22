@@ -1,5 +1,5 @@
 // Constants for the application
-const APP_VERSION = "2.19.0 (build 329)";
+const APP_VERSION = "2.20.0 (build 330)";
 
 // Initialize WebsimSocket
 let room;
@@ -94,36 +94,18 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
       selectedCard = cards[randomIndex];
     }
     
-    // First, clear current card state completely
-    await safeOperation(() =>
-      room.collection('player').update(player.id, {
-        current_card: null, 
-        card_start_time: null,
-        card_duration: null,
-        card_received: false,
-        ready_for_card: true,
-        waiting_for_player_ack: false,
-        distribution_pending: true,
-        distribution_id: distributionId,
-        reset_timestamp: Date.now(),
-      })
-    );
-    
-    // Small delay for client processing
-    await new Promise(resolve => setTimeout(resolve, 300));
-    
-    // Send the new card
+    // SIMPLIFIED: Send the card directly without clearing first
     await safeOperation(() =>
       room.collection('player').update(player.id, {
         current_card: selectedCard,
         current_deck_name: selectedDeckName,
         current_deck_id: selectedDeckId,
         card_duration: randomDuration,
-        distribution_pending: false,
         distribution_id: distributionId,
+        card_start_time: new Date().toISOString(),
+        card_received: true,
         ready_for_card: false,
-        waiting_for_player_ack: true,
-        card_sent_at: new Date().toISOString(),
+        waiting_for_player_ack: false,
         force_render: Date.now(),
       })
     );
