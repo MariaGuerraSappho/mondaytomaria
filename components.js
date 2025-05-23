@@ -229,7 +229,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
   const playerRef = useRef(null);
   const playerSubscriptionRef = useRef(null);
 
-  // Simplified update player status function
+  // Update player status
   const updatePlayerStatus = async (statusUpdate) => {
     if (!playerId) return;
     
@@ -245,9 +245,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     }
   };
 
-  // Fixed: Completely rewritten card display function for reliability
+  // CRITICAL FIX: Simplified and robust card processing function
   const handleCardDisplay = (playerData) => {
-    console.log(`[${APP_VERSION}] Processing card update for player:`, playerData);
+    console.log(`[${APP_VERSION}] CRITICAL FIX: Processing card update for player:`, playerData);
     
     // Clear any existing timer
     if (timerRef.current) {
@@ -277,7 +277,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     const startTime = new Date(playerData.card_start_time || new Date());
     const duration = playerData.card_duration || 30;
     
-    console.log(`[${APP_VERSION}] Displaying card: "${cardText}" from deck "${deckName}" with duration ${duration}s`);
+    console.log(`[${APP_VERSION}] CRITICAL FIX: Displaying card: "${cardText}" from deck "${deckName}" with duration ${duration}s`);
     
     // Create the new card object
     const newCard = {
@@ -346,7 +346,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       }
       
       try {
-        console.log(`[${APP_VERSION}] Initializing player view for player ${name} (${playerId}) in session ${pin}`);
+        console.log(`[${APP_VERSION}] CRITICAL FIX: Initializing player view for player ${name} (${playerId}) in session ${pin}`);
         
         // Get session data
         const sessions = await room.collection('session')
@@ -369,8 +369,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         
         setSession(sessionData);
         
-        // Check if player exists and get current state
+        // CRITICAL FIX: Get player data directly first thing
         try {
+          // Important: Make sure we get the player data directly first
           const players = await room.collection('player')
             .filter({ id: playerId })
             .getList();
@@ -384,9 +385,16 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           const playerData = players[0];
           playerRef.current = playerData;
           
-          // Fixed: Important - Process any existing card immediately
+          console.log(`[${APP_VERSION}] CRITICAL FIX: Retrieved player data:`, {
+            id: playerData.id,
+            name: playerData.name,
+            current_card: playerData.current_card,
+            card_start_time: playerData.card_start_time
+          });
+          
+          // Process any existing card immediately
           if (playerData.current_card) {
-            console.log(`[${APP_VERSION}] Found existing card to display: ${playerData.current_card}`);
+            console.log(`[${APP_VERSION}] CRITICAL FIX: Found existing card to display: ${playerData.current_card}`);
             handleCardDisplay(playerData);
           } else {
             console.log(`[${APP_VERSION}] No initial card found, waiting for card`);
@@ -406,8 +414,8 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           return;
         }
         
-        // Critical fix: Set up more reliable subscription
-        console.log(`[${APP_VERSION}] Setting up player subscription for id: ${playerId}`);
+        // CRITICAL FIX: Implement a more direct subscription mechanism
+        console.log(`[${APP_VERSION}] CRITICAL FIX: Setting up player subscription for id: ${playerId}`);
         
         if (playerSubscriptionRef.current) {
           playerSubscriptionRef.current();
@@ -419,7 +427,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             if (!updatedPlayers || updatedPlayers.length === 0) return;
             
             const updatedPlayer = updatedPlayers[0];
-            console.log(`[${APP_VERSION}] Player update received:`, {
+            console.log(`[${APP_VERSION}] CRITICAL FIX: Player subscription update received:`, {
               id: updatedPlayer.id,
               current_card: updatedPlayer.current_card,
               card_start_time: updatedPlayer.card_start_time,
@@ -429,11 +437,40 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             // Store the latest player data
             playerRef.current = updatedPlayer;
             
-            // Critical fix: Always process card updates
+            // Always process card updates from subscription
             handleCardDisplay(updatedPlayer);
           });
         
         playerSubscriptionRef.current = unsubscribe;
+        
+        // Additional periodic check for card updates in case subscription fails
+        const cardCheckInterval = setInterval(async () => {
+          try {
+            const latestPlayers = await room.collection('player')
+              .filter({ id: playerId })
+              .getList();
+              
+            if (latestPlayers.length > 0) {
+              const latestPlayer = latestPlayers[0];
+              
+              // Only process if different from current
+              if (playerRef.current?.current_card !== latestPlayer.current_card ||
+                  playerRef.current?.card_start_time !== latestPlayer.card_start_time) {
+                
+                console.log(`[${APP_VERSION}] CRITICAL FIX: Detected card change from periodic check:`, {
+                  id: latestPlayer.id,
+                  current_card: latestPlayer.current_card,
+                  card_start_time: latestPlayer.card_start_time
+                });
+                
+                playerRef.current = latestPlayer;
+                handleCardDisplay(latestPlayer);
+              }
+            }
+          } catch (error) {
+            console.error(`[${APP_VERSION}] Error in periodic card check:`, error);
+          }
+        }, 3000); // Check every 3 seconds
         
         // Heartbeat to keep player active
         const heartbeatInterval = setInterval(async () => {
@@ -447,6 +484,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         
         return () => {
           clearInterval(heartbeatInterval);
+          clearInterval(cardCheckInterval);
         };
       } catch (error) {
         console.error(`[${APP_VERSION}] Error initializing player view:`, error);
@@ -936,7 +974,7 @@ function ConductorView({ onNavigate }) {
     }
   };
 
-  // Distribute cards to a single player - SIMPLIFIED
+  // CRITICAL FIX: Simplified card distribution to one player 
   const distributeCardToPlayer = async (player) => {
     if (!sessionId || !selectedDeck) {
       console.log(`[${APP_VERSION}] Cannot distribute: missing session or deck`);
@@ -952,8 +990,10 @@ function ConductorView({ onNavigate }) {
         return false;
       }
 
-      // SIMPLIFIED: Use the utility function to distribute the card
-      const result = await improvedDistributeCard(
+      console.log(`[${APP_VERSION}] CRITICAL FIX: Distributing card to player ${player.id} (${player.name})`);
+      
+      // DIRECT CALL: Use the simplified distributeCard function from utils.js
+      const result = await distributeCard(
         player, 
         selectedDeckData, 
         distributionMode, 
@@ -961,6 +1001,26 @@ function ConductorView({ onNavigate }) {
         minTimerSeconds, 
         maxTimerSeconds
       );
+      
+      console.log(`[${APP_VERSION}] Distribution result:`, result);
+      
+      if (result.success) {
+        // Immediately refresh the player's data to verify the update worked
+        try {
+          const updatedPlayer = await room.collection('player')
+            .filter({ id: player.id })
+            .getList();
+            
+          if (updatedPlayer.length > 0) {
+            console.log(`[${APP_VERSION}] Verified player update:`, {
+              id: updatedPlayer[0].id,
+              current_card: updatedPlayer[0].current_card
+            });
+          }
+        } catch (err) {
+          console.error(`[${APP_VERSION}] Verification check failed:`, err);
+        }
+      }
       
       return result.success;
     } catch (error) {
@@ -984,7 +1044,7 @@ function ConductorView({ onNavigate }) {
     };
   }, [pin, setupPlayerSubscription]);
 
-  // Auto-distribute cards - SIMPLIFIED to be less aggressive with refreshes
+  // CRITICAL FIX: Simplify and make more robust auto-distribution
   useEffect(() => {
     // Clean up previous interval
     if (autoDistributeIntervalRef.current) {
@@ -994,11 +1054,16 @@ function ConductorView({ onNavigate }) {
     
     // Set up new interval if in session and auto-distribute is enabled
     if (step === 'session' && autoDistribute && players.length > 0) {
+      console.log(`[${APP_VERSION}] CRITICAL FIX: Setting up auto-distribution for ${players.length} players`);
+      
       autoDistributeIntervalRef.current = setInterval(async () => {
         // Check for players needing cards
         const now = Date.now();
         
         const playersNeedingCards = players.filter(player => {
+          // Skip inactive players
+          if (!player.active) return false;
+          
           // Skip players without cards or with END signal
           if (!player.current_card || player.current_card === 'END') {
             return true; // New players or players who just joined need cards
@@ -1022,15 +1087,17 @@ function ConductorView({ onNavigate }) {
         
         // Distribute new cards to players who need them
         if (playersNeedingCards.length > 0) {
-          console.log(`[${APP_VERSION}] Auto-distributing cards to ${playersNeedingCards.length} players`);
+          console.log(`[${APP_VERSION}] CRITICAL FIX: Auto-distributing cards to ${playersNeedingCards.length} players:`, 
+            playersNeedingCards.map(p => p.name));
           
           for (const player of playersNeedingCards) {
+            console.log(`[${APP_VERSION}] Auto-distributing card to player ${player.name} (${player.id})`);
             await distributeCardToPlayer(player);
             // Small delay between distributions
-            await new Promise(resolve => setTimeout(resolve, 300));
+            await new Promise(resolve => setTimeout(resolve, 500));
           }
         }
-      }, 3000); // Check every 3 seconds (less frequent)
+      }, 3000); // Check every 3 seconds
     }
     
     return () => {

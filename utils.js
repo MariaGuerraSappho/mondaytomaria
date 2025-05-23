@@ -1,5 +1,5 @@
 // Constants for the application
-const APP_VERSION = "2.23.0 (build 337)";
+const APP_VERSION = "2.24.0 (build 338)";
 
 // Initialize WebsimSocket
 let room;
@@ -36,13 +36,10 @@ const safeOperation = async (operation, retries = 3) => {
   throw lastError || new Error('Operation failed');
 };
 
-// FIXED: Completely rewritten card distribution function with guaranteed delivery
-const improvedDistributeCard = async (player, deckData, distributionMode, players, minTimerSeconds, maxTimerSeconds) => {
+// FIXED: Completely rewritten card distribution function for reliable delivery
+const distributeCard = async (player, deckData, distributionMode, players, minTimerSeconds, maxTimerSeconds) => {
   try {
-    console.log(`[${APP_VERSION}] Distributing card to player ${player.id} (${player.name})`);
-    
-    // Generate a unique distribution ID
-    const distributionId = `dist_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+    console.log(`[${APP_VERSION}] CRITICAL FIX: Distributing card to player ${player.id} (${player.name})`);
     
     // Random duration between min and max
     const randomDuration = Math.floor(
@@ -100,49 +97,35 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
       console.log(`[${APP_VERSION}] Selected random card: ${selectedCard}`);
     }
     
-    // CRITICAL FIX: Very simple and direct update, minimizing complexity
-    console.log(`[${APP_VERSION}] Sending card "${selectedCard}" to player ${player.id} for ${randomDuration}s`);
+    // DIRECT FIX: Use a very simple update with minimal fields to ensure reliability
+    console.log(`[${APP_VERSION}] DIRECT FIX: Sending card "${selectedCard}" to player ${player.id} for ${randomDuration}s`);
     
-    try {
-      // Simplified update with only essential fields
-      await safeOperation(() =>
-        room.collection('player').update(player.id, {
-          current_card: selectedCard,
-          current_deck_name: selectedDeckName,
-          current_deck_id: selectedDeckId,
-          card_duration: randomDuration,
-          card_start_time: new Date().toISOString(),
-          ready_for_card: false
-        })
-      );
-      
-      console.log(`[${APP_VERSION}] Card successfully sent to player ${player.id}`);
-      
-      // Verify the update was applied
-      const updatedPlayer = await safeOperation(() => 
-        room.collection('player')
-          .filter({ id: player.id })
-          .getList()
-      );
-      
-      if (updatedPlayer.length > 0) {
-        console.log(`[${APP_VERSION}] Verified card update for player:`, {
-          id: updatedPlayer[0].id,
-          current_card: updatedPlayer[0].current_card
-        });
-      }
-      
-      return {
-        success: true,
-        card: selectedCard,
-        deckName: selectedDeckName,
-        deckId: selectedDeckId,
-        duration: randomDuration
-      };
-    } catch (updateError) {
-      console.error(`[${APP_VERSION}] Failed to update player with card:`, updateError);
-      throw updateError;
-    }
+    // 1. Minimal update with only essential fields for reliability
+    const updateData = {
+      current_card: selectedCard,
+      current_deck_name: selectedDeckName,
+      current_deck_id: selectedDeckId,
+      card_duration: randomDuration,
+      card_start_time: new Date().toISOString(),
+      ready_for_card: false
+    };
+    
+    console.log(`[${APP_VERSION}] Player update data:`, JSON.stringify(updateData));
+    
+    // 2. Perform update with retry
+    await safeOperation(() => 
+      room.collection('player').update(player.id, updateData)
+    );
+    
+    console.log(`[${APP_VERSION}] Card successfully sent to player ${player.id}`);
+    
+    return {
+      success: true,
+      card: selectedCard,
+      deckName: selectedDeckName,
+      deckId: selectedDeckId,
+      duration: randomDuration
+    };
   } catch (error) {
     console.error(`[${APP_VERSION}] Error distributing card:`, error);
     return { success: false, error: error.message };
