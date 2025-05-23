@@ -1,5 +1,5 @@
 // Constants for the application
-const APP_VERSION = "2.24.2 (build 340)";
+const APP_VERSION = "2.24.4 (build 343)";
 
 // Initialize WebsimSocket
 let room;
@@ -36,26 +36,39 @@ const safeOperation = async (operation, retries = 3) => {
   throw lastError || new Error('Operation failed');
 };
 
-// IMPROVED: Completely rewritten card distribution function with strict timing enforcement
+// FIXED: Enhanced distributeCard to prevent premature distribution
 const distributeCard = async (player, deckData, distributionMode, players, minTimerSeconds, maxTimerSeconds) => {
   try {
-    console.log(`[${APP_VERSION}] IMPROVED: Distributing card to player ${player.id} (${player.name})`);
+    console.log(`[${APP_VERSION}] Distributing card to player ${player.id} (${player.name})`);
     
+    // STRICT CHECK: Ensure player is truly ready for a new card
     // First, check if player already has an active card with remaining time
     if (player.current_card && player.current_card !== 'END' && player.card_start_time && player.card_duration) {
       const cardStartTime = new Date(player.card_start_time).getTime();
       const cardEndTime = cardStartTime + (player.card_duration * 1000);
       const now = Date.now();
       
-      // If card still has time remaining, don't distribute a new one
-      if (now < cardEndTime) {
-        console.log(`[${APP_VERSION}] SKIPPED: Player ${player.name} already has an active card with ${Math.ceil((cardEndTime - now)/1000)}s remaining`);
+      // Add a buffer to ensure we don't distribute before the previous card is truly finished
+      const bufferMs = 2000; // 2 seconds buffer
+      
+      // If card still has time remaining (with buffer), don't distribute a new one
+      if (now < (cardEndTime + bufferMs)) {
+        console.log(`[${APP_VERSION}] STRICT CHECK: Player ${player.name} still has an active card with ${Math.ceil((cardEndTime - now)/1000)}s remaining (+${bufferMs/1000}s buffer)`);
         return {
           success: false,
           reason: 'CARD_STILL_ACTIVE',
           timeRemaining: Math.ceil((cardEndTime - now)/1000)
         };
       }
+    }
+    
+    // ADDITIONAL CHECK: Verify player is explicitly marked as ready for a card
+    if (player.ready_for_card !== true) {
+      console.log(`[${APP_VERSION}] Player ${player.name} is not explicitly marked as ready for a card`);
+      return {
+        success: false,
+        reason: 'PLAYER_NOT_READY'
+      };
     }
     
     // Random duration between min and max
@@ -124,7 +137,7 @@ const distributeCard = async (player, deckData, distributionMode, players, minTi
       current_deck_id: selectedDeckId,
       card_duration: randomDuration,
       card_start_time: preciseStartTime.toISOString(),
-      ready_for_card: false,
+      ready_for_card: false, // CRITICAL: Mark as not ready for next card until current finishes
       card_received: false
     };
     

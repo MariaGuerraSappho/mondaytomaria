@@ -233,6 +233,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
   const playerSubscriptionRef = useRef(null);
   const cardEndTimeRef = useRef(null); // Store the absolute end time for accuracy
   const lastCardRef = useRef(null); // Track the last card to avoid duplicates
+  const processingCardRef = useRef(false); // Flag to prevent processing a card while already processing one
 
   // Update player status
   const updatePlayerStatus = async (statusUpdate) => {
@@ -252,8 +253,15 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     }
   };
 
-  // IMPROVED: Completely rewritten card display with precise timer handling
+  // FIXED: Complete rewrite of card display logic to ensure timers work correctly
   const handleCardDisplay = (playerData) => {
+    // Prevent processing a card if we're already processing one
+    if (processingCardRef.current) {
+      console.log(`[${APP_VERSION}] Already processing a card update, skipping this update`);
+      return;
+    }
+    
+    processingCardRef.current = true;
     console.log(`[${APP_VERSION}] Processing card update for player:`, playerData);
     
     // Check if player has a card
@@ -270,6 +278,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         timerRef.current = null;
       }
       
+      processingCardRef.current = false;
       return;
     }
     
@@ -286,6 +295,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         timerRef.current = null;
       }
       
+      processingCardRef.current = false;
       return;
     }
     
@@ -296,6 +306,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
                       
     if (isSameCard) {
       console.log(`[${APP_VERSION}] Received duplicate card update, ignoring`);
+      processingCardRef.current = false;
       return;
     }
     
@@ -318,7 +329,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     const newCard = {
       text: cardText,
       deckName: deckName,
-      startTime: startTime,
+      startTime: playerData.card_start_time,
       duration: duration,
     };
     
@@ -338,7 +349,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     const remaining = Math.max(0, cardEndTime - now);
     const secondsRemaining = Math.ceil(remaining / 1000);
     
-    console.log(`[${APP_VERSION}] Card timer: ${secondsRemaining}s remaining out of ${duration}s`);
+    console.log(`[${APP_VERSION}] Card timer: ${secondsRemaining}s remaining out of ${duration}s (ends at ${new Date(cardEndTime).toISOString()})`);
     
     setTimeLeft(secondsRemaining);
     setWaitingForCard(false);
@@ -349,11 +360,12 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       card_acknowledged_at: new Date().toISOString()
     });
     
+    // Only start a timer if there's time remaining
     if (remaining > 0) {
       setTimerStarted(true);
       
-      // Use a more precise timer that checks against absolute end time
-      // Using a faster interval for more accurate countdown
+      // FIXED: Use a fixed interval timer that verifies against absolute end time
+      // Using a faster interval for more accurate countdown but with strict checks
       timerRef.current = setInterval(() => {
         const currentTime = Date.now();
         const timeRemaining = Math.max(0, cardEndTimeRef.current - currentTime);
@@ -362,9 +374,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         // Update the displayed time
         setTimeLeft(secondsLeft);
         
-        // Only end the timer when we're truly at zero
+        // Only end the timer when we're truly at zero with a small buffer for interval timing
         if (timeRemaining <= 50) { // Small buffer for interval timing
-          console.log(`[${APP_VERSION}] Timer completed naturally at ${new Date().toISOString()}`);
+          console.log(`[${APP_VERSION}] Timer completed at ${new Date().toISOString()} (end time was ${new Date(cardEndTimeRef.current).toISOString()})`);
           
           // Clear the interval first to prevent multiple triggers
           clearInterval(timerRef.current);
@@ -375,11 +387,15 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           setTimeLeft(0);
           setWaitingForCard(true);
           
-          // Mark as ready for next card when timer actually completes
-          updatePlayerStatus({ 
-            ready_for_card: true,
-            card_ended_at: new Date().toISOString()
-          });
+          // CRITICAL: Add a small delay before marking as ready for next card
+          // This ensures the UI has updated and prevents race conditions
+          setTimeout(() => {
+            console.log(`[${APP_VERSION}] Marking player as ready for next card after delay`);
+            updatePlayerStatus({ 
+              ready_for_card: true,
+              card_ended_at: new Date().toISOString()
+            });
+          }, 1000);
         }
       }, 100); // Update very frequently for smoother countdown and accuracy
     } else {
@@ -387,11 +403,17 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       console.log(`[${APP_VERSION}] Card already expired`);
       setTimerStarted(false);
       setWaitingForCard(true);
-      updatePlayerStatus({ 
-        ready_for_card: true,
-        card_ended_at: new Date().toISOString()
-      });
+      
+      // CRITICAL: Add a small delay before marking as ready for next card
+      setTimeout(() => {
+        updatePlayerStatus({ 
+          ready_for_card: true,
+          card_ended_at: new Date().toISOString()
+        });
+      }, 1000);
     }
+    
+    processingCardRef.current = false;
   };
 
   useEffect(() => {
@@ -457,20 +479,13 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           } else {
             console.log(`[${APP_VERSION}] No initial card found, waiting for card`);
             setWaitingForCard(true);
+            
+            // Mark as ready for card if no current card
+            await updatePlayerStatus({
+              active: true,
+              ready_for_card: true
+            });
           }
-          
-          // Mark player as active and ready for cards if needed
-          const readyForCard = !playerData.current_card || 
-                              playerData.current_card === 'END' || 
-                              (playerData.card_start_time && playerData.card_duration && 
-                               new Date(playerData.card_start_time).getTime() + 
-                               (playerData.card_duration * 1000) < Date.now());
-          
-          await updatePlayerStatus({
-            active: true,
-            last_seen: new Date().toISOString(),
-            ready_for_card: readyForCard
-          });
         } catch (playerError) {
           console.error(`[${APP_VERSION}] Error getting player data:`, playerError);
           setError('Error connecting to session. Please try refreshing the page.');
@@ -515,35 +530,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         
         playerSubscriptionRef.current = unsubscribe;
         
-        // Additional periodic check for card updates in case subscription fails
-        const cardCheckInterval = setInterval(async () => {
-          try {
-            const latestPlayers = await room.collection('player')
-              .filter({ id: playerId })
-              .getList();
-              
-            if (latestPlayers.length > 0) {
-              const latestPlayer = latestPlayers[0];
-              
-              // Only process if different from current
-              if (playerRef.current?.current_card !== latestPlayer.current_card ||
-                  playerRef.current?.card_start_time !== latestPlayer.card_start_time) {
-                
-                console.log(`[${APP_VERSION}] Detected card change from periodic check:`, {
-                  id: latestPlayer.id,
-                  current_card: latestPlayer.current_card,
-                  card_start_time: latestPlayer.card_start_time
-                });
-                
-                playerRef.current = latestPlayer;
-                handleCardDisplay(latestPlayer);
-              }
-            }
-          } catch (error) {
-            console.error(`[${APP_VERSION}] Error in periodic card check:`, error);
-          }
-        }, 8000); // Check less frequently to avoid interrupting timer
-        
         // Heartbeat to keep player active
         const heartbeatInterval = setInterval(async () => {
           await updatePlayerStatus({ 
@@ -556,7 +542,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         
         return () => {
           clearInterval(heartbeatInterval);
-          clearInterval(cardCheckInterval);
         };
       } catch (error) {
         console.error(`[${APP_VERSION}] Error initializing player view:`, error);
@@ -1137,7 +1122,7 @@ function ConductorView({ onNavigate }) {
     };
   }, [pin, setupPlayerSubscription]);
 
-  // IMPROVED: Completely rewritten auto-distribution with strict timing enforcement
+  // FIXED: Completely rewritten auto-distribution to prevent premature card distribution
   useEffect(() => {
     // Clean up previous interval
     if (autoDistributeIntervalRef.current) {
@@ -1147,23 +1132,23 @@ function ConductorView({ onNavigate }) {
     
     // Set up new interval if in session and auto-distribute is enabled
     if (step === 'session' && autoDistribute && players.length > 0) {
-      console.log(`[${APP_VERSION}] IMPROVED: Setting up auto-distribution for ${players.length} players`);
+      console.log(`[${APP_VERSION}] Setting up auto-distribution for ${players.length} players`);
       
       autoDistributeIntervalRef.current = setInterval(async () => {
         // Get precise current time
         const now = Date.now();
         
-        // Find players who genuinely need cards
+        // Find players who genuinely need cards with strict validation
         const playersNeedingCards = players.filter(player => {
           // Skip inactive players
           if (!player.active) return false;
           
-          // If explicitly ready for a card, allow distribution
-          if (player.ready_for_card === true) {
-            return true;
+          // CRITICAL: Only distribute to players explicitly marked as ready
+          if (player.ready_for_card !== true) {
+            return false;
           }
           
-          // If no card, player needs one
+          // If no card, player needs one (as long as they're ready)
           if (!player.current_card) {
             return true;
           }
@@ -1182,13 +1167,14 @@ function ConductorView({ onNavigate }) {
           const cardStartTime = new Date(player.card_start_time).getTime();
           const cardEndTime = cardStartTime + (player.card_duration * 1000);
           
-          // Add a 1-second buffer to ensure the timer has fully completed
-          return now > (cardEndTime + 1000);
+          // Add a significant buffer (3 seconds) to ensure the timer has fully completed
+          // and any network delays in updating ready_for_card have resolved
+          return now > (cardEndTime + 3000);
         });
         
         // Only proceed if we found players genuinely needing cards
         if (playersNeedingCards.length > 0) {
-          console.log(`[${APP_VERSION}] IMPROVED: Auto-distributing cards to ${playersNeedingCards.length} players:`, 
+          console.log(`[${APP_VERSION}] Auto-distributing cards to ${playersNeedingCards.length} players:`, 
             playersNeedingCards.map(p => p.name));
           
           // Process one player at a time with delays to prevent race conditions
@@ -1202,11 +1188,11 @@ function ConductorView({ onNavigate }) {
             console.log(`[${APP_VERSION}] Auto-distributing card to player ${player.name} (${player.id})`);
             await distributeCardToPlayer(player);
             
-            // Small delay between distributions to prevent overloading
-            await new Promise(resolve => setTimeout(resolve, 800));
+            // Increased delay between distributions to prevent overloading and race conditions
+            await new Promise(resolve => setTimeout(resolve, 1500));
           }
         }
-      }, 2000); // Check frequently but not too frequently
+      }, 3000); // Reduced check frequency to prevent rapid distribution
     }
     
     return () => {
