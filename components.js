@@ -598,26 +598,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           </>
         )}
         
-        <button
-          className="btn btn-outline btn-block"
-          onClick={() => {
-            if (timerRef.current) {
-              clearInterval(timerRef.current);
-            }
-            
-            if (playerId) {
-              updatePlayerStatus({
-                active: false,
-                left_at: new Date().toISOString()
-              });
-            }
-            
-            onNavigate('home');
-          }}
-          style={{ marginTop: '20px' }}
-        >
-          Leave
-        </button>
+        {/* Leave button removed as requested */}
       </div>
     </div>
   );
@@ -641,9 +622,12 @@ function ConductorView({ onNavigate }) {
   const [newDeckCards, setNewDeckCards] = useState('');
   const [autoDistribute, setAutoDistribute] = useState(true);
   const [showArchivedDecks, setShowArchivedDecks] = useState(false);
+  const [endingSession, setEndingSession] = useState(false);
+  const [endCountdown, setEndCountdown] = useState(5);
   const fileInputRef = useRef(null);
   const playersSubscriptionRef = useRef(null);
   const autoDistributeIntervalRef = useRef(null);
+  const endCountdownRef = useRef(null);
   const pendingDistributionsRef = useRef(new Set()); // Track players with pending distribution
 
   // Load decks
@@ -991,6 +975,94 @@ function ConductorView({ onNavigate }) {
     }
   };
 
+  // End session with countdown
+  const endSession = async () => {
+    if (!sessionId) return;
+    if (!confirm('Are you sure you want to end the session?')) return;
+
+    try {
+      setEndingSession(true);
+      setEndCountdown(5);
+      
+      // Start countdown
+      if (endCountdownRef.current) {
+        clearInterval(endCountdownRef.current);
+      }
+      
+      endCountdownRef.current = setInterval(() => {
+        setEndCountdown(prev => {
+          const newCount = prev - 1;
+          if (newCount <= 0) {
+            clearInterval(endCountdownRef.current);
+            
+            // Actually end the session after countdown
+            finalizeSessionEnd();
+          }
+          return newCount;
+        });
+      }, 1000);
+      
+    } catch (error) {
+      setError('Failed to start session end countdown');
+      setEndingSession(false);
+    }
+  };
+  
+  // Actually end the session after countdown
+  const finalizeSessionEnd = async () => {
+    try {
+      setLoading(true);
+      
+      // Send END signal to all players with multiple retries for reliability
+      for (let attempt = 0; attempt < 3; attempt++) {
+        for (const player of players) {
+          if (player.active) {
+            try {
+              await safeOperation(() =>
+                room.collection('player').update(player.id, {
+                  current_card: 'END',
+                  card_start_time: new Date().toISOString(),
+                  ready_for_card: false
+                })
+              );
+            } catch (err) {
+              console.error(`Failed to send END to player ${player.name} on attempt ${attempt + 1}:`, err);
+            }
+          }
+        }
+        
+        // Brief delay between retries
+        if (attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, 800));
+        }
+      }
+
+      // Update session status
+      await safeOperation(() =>
+        room.collection('session').update(sessionId, {
+          ended: true,
+          active: false,
+          ended_at: new Date().toISOString()
+        })
+      );
+
+      setSuccess('Session ended');
+      
+      // Return to setup after a delay
+      setTimeout(() => {
+        setStep('setup');
+        setSessionId('');
+        setPin('');
+        setEndingSession(false);
+      }, 2000);
+    } catch (error) {
+      setError('Failed to end session');
+      setEndingSession(false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Card distribution function
   const distributeCardToPlayer = async (player) => {
     if (!sessionId || !selectedDeck) {
@@ -1156,6 +1228,15 @@ function ConductorView({ onNavigate }) {
       }
     };
   }, [step, autoDistribute, players, selectedDeck, distributionMode, minTimerSeconds, maxTimerSeconds, pin]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (endCountdownRef.current) {
+        clearInterval(endCountdownRef.current);
+      }
+    };
+  }, []);
 
   if (step === 'setup') {
     return (
@@ -1618,7 +1699,7 @@ function ConductorView({ onNavigate }) {
                 setLoading(false);
               }
             }}
-            disabled={loading}
+            disabled={loading || endingSession}
           >
             {loading ? 'Sending...' : 'Distribute Cards Now'}
           </button>
@@ -1626,45 +1707,10 @@ function ConductorView({ onNavigate }) {
           <button
             className="btn btn-outline"
             style={{ width: '120px', margin: 0 }}
-            onClick={async () => {
-              if (!sessionId) return;
-              if (!confirm('Are you sure you want to end the session?')) return;
-
-              try {
-                setLoading(true);
-                
-                for (const player of players) {
-                  await safeOperation(() =>
-                    room.collection('player').update(player.id, {
-                      current_card: 'END',
-                      card_start_time: new Date().toISOString()
-                    })
-                  );
-                }
-
-                await safeOperation(() =>
-                  room.collection('session').update(sessionId, {
-                    ended: true,
-                    active: false
-                  })
-                );
-
-                setSuccess('Session ended');
-                
-                setTimeout(() => {
-                  setStep('setup');
-                  setSessionId('');
-                  setPin('');
-                }, 2000);
-              } catch (error) {
-                setError('Failed to end session');
-              } finally {
-                setLoading(false);
-              }
-            }}
-            disabled={loading}
+            onClick={endSession}
+            disabled={loading || endingSession}
           >
-            End Session
+            {endingSession ? `Ending in ${endCountdown}s` : 'End Session'}
           </button>
         </div>
         
@@ -1672,7 +1718,7 @@ function ConductorView({ onNavigate }) {
         {error && <div className="error" style={{ margin: '5px 0', padding: '8px' }}>{error}</div>}
         {success && <div className="success" style={{ margin: '5px 0', padding: '8px' }}>{success}</div>}
 
-        {/* Players grid - optimized to show more at once */}
+        {/* Players grid - enhanced to show more details about cards */}
         <h3 className="subheader" style={{ marginBottom: '5px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>Players ({players.length})</span>
           <button
@@ -1697,19 +1743,49 @@ function ConductorView({ onNavigate }) {
               }
               
               return (
-                <div key={player.id} className="player-card-mini">
-                  <div className="player-name">{player.name}</div>
+                <div key={player.id} className="player-card-mini" style={{
+                  border: player.current_card ? '2px solid var(--primary)' : '1px solid var(--border)',
+                  opacity: player.active ? 1 : 0.6
+                }}>
+                  <div className="player-name" style={{
+                    display: 'flex',
+                    justifyContent: 'space-between'
+                  }}>
+                    <span>{player.name}</span>
+                    {!player.active && <span style={{fontSize: '11px', color: 'var(--text-light)'}}>(inactive)</span>}
+                  </div>
+                  
                   {player.current_card && player.current_card !== 'END' ? (
                     <div className="player-current-card">
                       <div className="card-text-mini">{player.current_card}</div>
-                      <div className="card-source">
-                        From: {player.current_deck_name || "Unknown"}
+                      <div className="card-source" style={{
+                        display: 'flex',
+                        justifyContent: 'space-between'
+                      }}>
+                        <span>From: {player.current_deck_name || "Unknown"}</span>
+                        {timeRemaining !== null && (
+                          <span style={{
+                            fontWeight: 'bold',
+                            color: timeRemaining < 5 ? 'var(--error)' : 'var(--accent)'
+                          }}>
+                            {timeRemaining}s
+                          </span>
+                        )}
                       </div>
-                      <div className="card-status">
-                        {timeRemaining !== null ? (
-                          <span className="status-active">{timeRemaining}s remaining</span>
-                        ) : (
-                          <span className="status-active">Active</span>
+                      <div style={{
+                        marginTop: '5px',
+                        height: '4px',
+                        backgroundColor: '#eee',
+                        borderRadius: '2px',
+                        overflow: 'hidden'
+                      }}>
+                        {timeRemaining !== null && player.card_duration && (
+                          <div style={{
+                            height: '100%',
+                            width: `${(timeRemaining / player.card_duration) * 100}%`,
+                            backgroundColor: 'var(--primary)',
+                            transition: 'width 1s linear'
+                          }}></div>
                         )}
                       </div>
                     </div>

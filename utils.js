@@ -1,5 +1,5 @@
 // Constants for the application
-const APP_VERSION = "2.24.4 (build 343)";
+const APP_VERSION = "2.24.5 (build 344)";
 
 // Initialize WebsimSocket
 let room;
