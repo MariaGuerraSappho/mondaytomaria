@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.24.1 (build 339)";
+const APP_VERSION = "2.24.2 (build 340)";
 
 const { useState, useEffect } = React;
 const { createRoot } = ReactDOM;
@@ -14,9 +14,6 @@ try {
   room = new WebsimSocketFallback();
   console.log(`[${APP_VERSION}] Using fallback socket`);
 }
-
-// Make sure we reference the correct function
-const distributeCard = window.distributeCard || improvedDistributeCard || distributeCard;
 
 function App() {
   const [view, setView] = useState('home');

@@ -1,5 +1,5 @@
 // Constants for the application
-const APP_VERSION = "2.24.1 (build 339)";
+const APP_VERSION = "2.24.2 (build 340)";
 
 // Initialize WebsimSocket
 let room;
@@ -36,10 +36,27 @@ const safeOperation = async (operation, retries = 3) => {
   throw lastError || new Error('Operation failed');
 };
 
-// FIXED: Completely rewritten card distribution function for reliable delivery
+// IMPROVED: Completely rewritten card distribution function with strict timing enforcement
 const distributeCard = async (player, deckData, distributionMode, players, minTimerSeconds, maxTimerSeconds) => {
   try {
-    console.log(`[${APP_VERSION}] CRITICAL FIX: Distributing card to player ${player.id} (${player.name})`);
+    console.log(`[${APP_VERSION}] IMPROVED: Distributing card to player ${player.id} (${player.name})`);
+    
+    // First, check if player already has an active card with remaining time
+    if (player.current_card && player.current_card !== 'END' && player.card_start_time && player.card_duration) {
+      const cardStartTime = new Date(player.card_start_time).getTime();
+      const cardEndTime = cardStartTime + (player.card_duration * 1000);
+      const now = Date.now();
+      
+      // If card still has time remaining, don't distribute a new one
+      if (now < cardEndTime) {
+        console.log(`[${APP_VERSION}] SKIPPED: Player ${player.name} already has an active card with ${Math.ceil((cardEndTime - now)/1000)}s remaining`);
+        return {
+          success: false,
+          reason: 'CARD_STILL_ACTIVE',
+          timeRemaining: Math.ceil((cardEndTime - now)/1000)
+        };
+      }
+    }
     
     // Random duration between min and max
     const randomDuration = Math.floor(
@@ -97,34 +114,36 @@ const distributeCard = async (player, deckData, distributionMode, players, minTi
       console.log(`[${APP_VERSION}] Selected random card: ${selectedCard}`);
     }
     
-    // DIRECT FIX: Use a very simple update with minimal fields to ensure reliability
-    console.log(`[${APP_VERSION}] DIRECT FIX: Sending card "${selectedCard}" to player ${player.id} for ${randomDuration}s`);
+    // Current time with millisecond precision for exact timing
+    const preciseStartTime = new Date();
     
-    // 1. Minimal update with only essential fields for reliability
+    // Create update data with absolute millisecond precision timestamps
     const updateData = {
       current_card: selectedCard,
       current_deck_name: selectedDeckName,
       current_deck_id: selectedDeckId,
       card_duration: randomDuration,
-      card_start_time: new Date().toISOString(),
-      ready_for_card: false
+      card_start_time: preciseStartTime.toISOString(),
+      ready_for_card: false,
+      card_received: false
     };
     
     console.log(`[${APP_VERSION}] Player update data:`, JSON.stringify(updateData));
     
-    // 2. Perform update with retry
+    // Perform update with retry
     await safeOperation(() => 
       room.collection('player').update(player.id, updateData)
     );
     
-    console.log(`[${APP_VERSION}] Card successfully sent to player ${player.id}`);
+    console.log(`[${APP_VERSION}] Card successfully sent to player ${player.id} for ${randomDuration}s starting at ${preciseStartTime.toISOString()}`);
     
     return {
       success: true,
       card: selectedCard,
       deckName: selectedDeckName,
       deckId: selectedDeckId,
-      duration: randomDuration
+      duration: randomDuration,
+      startTime: preciseStartTime
     };
   } catch (error) {
     console.error(`[${APP_VERSION}] Error distributing card:`, error);
