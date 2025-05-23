@@ -228,6 +228,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
   const timerRef = useRef(null);
   const playerRef = useRef(null);
   const playerSubscriptionRef = useRef(null);
+  const cardEndTimeRef = useRef(null); // Store the absolute end time for accuracy
 
   // Update player status
   const updatePlayerStatus = async (statusUpdate) => {
@@ -245,9 +246,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     }
   };
 
-  // CRITICAL FIX: Simplified and robust card processing function
+  // TIMER FIX: Improved card display with precise timer handling
   const handleCardDisplay = (playerData) => {
-    console.log(`[${APP_VERSION}] CRITICAL FIX: Processing card update for player:`, playerData);
+    console.log(`[${APP_VERSION}] Processing card update for player:`, playerData);
     
     // Clear any existing timer
     if (timerRef.current) {
@@ -260,6 +261,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       console.log(`[${APP_VERSION}] No card present, waiting for card`);
       setWaitingForCard(true);
       setCard(null);
+      cardEndTimeRef.current = null;
       return;
     }
     
@@ -268,6 +270,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       console.log(`[${APP_VERSION}] Session ended notification received`);
       setCard({ text: 'Session Ended', isEnd: true });
       setWaitingForCard(false);
+      cardEndTimeRef.current = null;
       return;
     }
     
@@ -277,7 +280,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     const startTime = new Date(playerData.card_start_time || new Date());
     const duration = playerData.card_duration || 30;
     
-    console.log(`[${APP_VERSION}] CRITICAL FIX: Displaying card: "${cardText}" from deck "${deckName}" with duration ${duration}s`);
+    console.log(`[${APP_VERSION}] Displaying card: "${cardText}" from deck "${deckName}" with duration ${duration}s`);
     
     // Create the new card object
     const newCard = {
@@ -290,9 +293,12 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     // Update the UI to show the card
     setCard(newCard);
     
-    // Calculate time left
+    // TIMER FIX: Calculate exact end time and store it for consistency
     const cardStartTime = startTime.getTime();
     const cardEndTime = cardStartTime + (duration * 1000);
+    cardEndTimeRef.current = cardEndTime;
+    
+    // TIMER FIX: Calculate initial time remaining more precisely
     const now = Date.now();
     const remaining = Math.max(0, cardEndTime - now);
     const secondsRemaining = Math.ceil(remaining / 1000);
@@ -311,23 +317,27 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     if (remaining > 0) {
       setTimerStarted(true);
       
-      // Start a new timer for this card
+      // TIMER FIX: Use a more precise timer that checks against absolute end time
       timerRef.current = setInterval(() => {
-        setTimeLeft(prevTime => {
-          if (prevTime <= 1) {
-            clearInterval(timerRef.current);
-            timerRef.current = null;
-            setTimerStarted(false);
-            
-            // Mark as ready for next card
-            updatePlayerStatus({ ready_for_card: true });
-            setWaitingForCard(true);
-            
-            return 0;
-          }
-          return prevTime - 1;
-        });
-      }, 1000);
+        const currentTime = Date.now();
+        const timeRemaining = Math.max(0, cardEndTimeRef.current - currentTime);
+        const secondsLeft = Math.ceil(timeRemaining / 1000);
+        
+        setTimeLeft(secondsLeft);
+        
+        // Only end the timer when we're truly at zero
+        if (timeRemaining <= 50) { // Small buffer for interval timing
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+          setTimerStarted(false);
+          setTimeLeft(0);
+          
+          // TIMER FIX: Only mark as ready for next card when timer actually completes
+          console.log(`[${APP_VERSION}] Timer completed naturally`);
+          updatePlayerStatus({ ready_for_card: true });
+          setWaitingForCard(true);
+        }
+      }, 250); // Update more frequently for smoother countdown
     } else {
       // Card already expired
       console.log(`[${APP_VERSION}] Card already expired`);
@@ -346,7 +356,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       }
       
       try {
-        console.log(`[${APP_VERSION}] CRITICAL FIX: Initializing player view for player ${name} (${playerId}) in session ${pin}`);
+        console.log(`[${APP_VERSION}] Initializing player view for player ${name} (${playerId}) in session ${pin}`);
         
         // Get session data
         const sessions = await room.collection('session')
@@ -369,7 +379,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         
         setSession(sessionData);
         
-        // CRITICAL FIX: Get player data directly first thing
+        // Get player data directly first thing
         try {
           // Important: Make sure we get the player data directly first
           const players = await room.collection('player')
@@ -385,7 +395,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           const playerData = players[0];
           playerRef.current = playerData;
           
-          console.log(`[${APP_VERSION}] CRITICAL FIX: Retrieved player data:`, {
+          console.log(`[${APP_VERSION}] Retrieved player data:`, {
             id: playerData.id,
             name: playerData.name,
             current_card: playerData.current_card,
@@ -394,7 +404,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           
           // Process any existing card immediately
           if (playerData.current_card) {
-            console.log(`[${APP_VERSION}] CRITICAL FIX: Found existing card to display: ${playerData.current_card}`);
+            console.log(`[${APP_VERSION}] Found existing card to display: ${playerData.current_card}`);
             handleCardDisplay(playerData);
           } else {
             console.log(`[${APP_VERSION}] No initial card found, waiting for card`);
@@ -414,8 +424,8 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           return;
         }
         
-        // CRITICAL FIX: Implement a more direct subscription mechanism
-        console.log(`[${APP_VERSION}] CRITICAL FIX: Setting up player subscription for id: ${playerId}`);
+        // Set up player subscription
+        console.log(`[${APP_VERSION}] Setting up player subscription for id: ${playerId}`);
         
         if (playerSubscriptionRef.current) {
           playerSubscriptionRef.current();
@@ -427,23 +437,31 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             if (!updatedPlayers || updatedPlayers.length === 0) return;
             
             const updatedPlayer = updatedPlayers[0];
-            console.log(`[${APP_VERSION}] CRITICAL FIX: Player subscription update received:`, {
+            // TIMER FIX: Only process new cards if they're different to avoid timer resets
+            const isNewCard = !playerRef.current || 
+                              playerRef.current.current_card !== updatedPlayer.current_card || 
+                              playerRef.current.card_start_time !== updatedPlayer.card_start_time;
+                              
+            console.log(`[${APP_VERSION}] Player subscription update received:`, {
               id: updatedPlayer.id,
               current_card: updatedPlayer.current_card,
               card_start_time: updatedPlayer.card_start_time,
-              card_duration: updatedPlayer.card_duration
+              isNewCard: isNewCard
             });
             
             // Store the latest player data
             playerRef.current = updatedPlayer;
             
-            // Always process card updates from subscription
-            handleCardDisplay(updatedPlayer);
+            // Only process card updates when there's actually a new card
+            if (isNewCard) {
+              handleCardDisplay(updatedPlayer);
+            }
           });
         
         playerSubscriptionRef.current = unsubscribe;
         
         // Additional periodic check for card updates in case subscription fails
+        // TIMER FIX: Reduced frequency to avoid timer interruptions
         const cardCheckInterval = setInterval(async () => {
           try {
             const latestPlayers = await room.collection('player')
@@ -457,7 +475,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
               if (playerRef.current?.current_card !== latestPlayer.current_card ||
                   playerRef.current?.card_start_time !== latestPlayer.card_start_time) {
                 
-                console.log(`[${APP_VERSION}] CRITICAL FIX: Detected card change from periodic check:`, {
+                console.log(`[${APP_VERSION}] Detected card change from periodic check:`, {
                   id: latestPlayer.id,
                   current_card: latestPlayer.current_card,
                   card_start_time: latestPlayer.card_start_time
@@ -470,7 +488,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           } catch (error) {
             console.error(`[${APP_VERSION}] Error in periodic card check:`, error);
           }
-        }, 3000); // Check every 3 seconds
+        }, 5000); // TIMER FIX: Check less frequently to avoid interrupting timer
         
         // Heartbeat to keep player active
         const heartbeatInterval = setInterval(async () => {
@@ -567,7 +585,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
                         <div className="timer-bar">
                           <div 
                             className={`timer-progress ${timeLeft === 0 ? 'timer-expired' : ''}`}
-                            style={{ width: `${(timeLeft / card.duration) * 100}%` }}
+                            style={{ 
+                              width: `${Math.max(0, Math.min(100, (timeLeft / card.duration) * 100))}%` 
+                            }}
                           ></div>
                         </div>
                         
