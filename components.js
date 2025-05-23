@@ -3,7 +3,7 @@ function HomeView({ onNavigate }) {
   return (
     <div className="container">
       <div className="card">
-        <h1 className="header">Improv Cards</h1>
+        <h1 className="header">From Monday to Maria</h1>
         <button className="btn btn-block" onClick={() => onNavigate('conductor')}>
           I am the Conductor
         </button>
@@ -219,21 +219,18 @@ function JoinView({ onNavigate, initialPin = '' }) {
   );
 }
 
-// Player View Component
+// Player View Component - Simplified
 function PlayerView({ pin, name, playerId, onNavigate }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [session, setSession] = useState(null);
   const [card, setCard] = useState(null);
-  const [timeLeft, setTimeLeft] = useState(0);
-  const [timerStarted, setTimerStarted] = useState(false);
   const [waitingForCard, setWaitingForCard] = useState(true);
   const timerRef = useRef(null);
   const playerRef = useRef(null);
   const playerSubscriptionRef = useRef(null);
-  const cardEndTimeRef = useRef(null); // Store the absolute end time for accuracy
-  const lastCardRef = useRef(null); // Track the last card to avoid duplicates
-  const processingCardRef = useRef(false); // Flag to prevent processing a card while already processing one
+  const cardEndTimeRef = useRef(null);
+  const lastCardRef = useRef(null);
 
   // Update player status
   const updatePlayerStatus = async (statusUpdate) => {
@@ -253,15 +250,8 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     }
   };
 
-  // FIXED: Complete rewrite of card display logic to ensure timers work correctly
+  // Simplified card display - no timer shown to player
   const handleCardDisplay = (playerData) => {
-    // Prevent processing a card if we're already processing one
-    if (processingCardRef.current) {
-      console.log(`[${APP_VERSION}] Already processing a card update, skipping this update`);
-      return;
-    }
-    
-    processingCardRef.current = true;
     console.log(`[${APP_VERSION}] Processing card update for player:`, playerData);
     
     // Check if player has a card
@@ -278,7 +268,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         timerRef.current = null;
       }
       
-      processingCardRef.current = false;
       return;
     }
     
@@ -295,7 +284,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         timerRef.current = null;
       }
       
-      processingCardRef.current = false;
       return;
     }
     
@@ -306,7 +294,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
                       
     if (isSameCard) {
       console.log(`[${APP_VERSION}] Received duplicate card update, ignoring`);
-      processingCardRef.current = false;
       return;
     }
     
@@ -319,17 +306,15 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     
     // Create the card object
     const cardText = playerData.current_card;
-    const deckName = playerData.current_deck_name || 'Unknown';
     const startTime = new Date(playerData.card_start_time || new Date());
     const duration = playerData.card_duration || 30;
     
-    console.log(`[${APP_VERSION}] Displaying card: "${cardText}" from deck "${deckName}" with duration ${duration}s, start time: ${startTime.toISOString()}`);
+    console.log(`[${APP_VERSION}] Displaying card: "${cardText}" with duration ${duration}s, start time: ${startTime.toISOString()}`);
     
     // Create the new card object
     const newCard = {
       text: cardText,
-      deckName: deckName,
-      startTime: playerData.card_start_time,
+      startTime: startTime,
       duration: duration,
     };
     
@@ -344,14 +329,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     const cardEndTime = cardStartTime + (duration * 1000);
     cardEndTimeRef.current = cardEndTime;
     
-    // Calculate initial time remaining more precisely
-    const now = Date.now();
-    const remaining = Math.max(0, cardEndTime - now);
-    const secondsRemaining = Math.ceil(remaining / 1000);
-    
-    console.log(`[${APP_VERSION}] Card timer: ${secondsRemaining}s remaining out of ${duration}s (ends at ${new Date(cardEndTime).toISOString()})`);
-    
-    setTimeLeft(secondsRemaining);
     setWaitingForCard(false);
     
     // Send acknowledgment that card was received and displayed
@@ -360,60 +337,40 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       card_acknowledged_at: new Date().toISOString()
     });
     
-    // Only start a timer if there's time remaining
-    if (remaining > 0) {
-      setTimerStarted(true);
-      
-      // FIXED: Use a fixed interval timer that verifies against absolute end time
-      // Using a faster interval for more accurate countdown but with strict checks
+    // Timer for internal use only (not displayed to player)
+    if (cardEndTime > Date.now()) {
       timerRef.current = setInterval(() => {
         const currentTime = Date.now();
         const timeRemaining = Math.max(0, cardEndTimeRef.current - currentTime);
-        const secondsLeft = Math.ceil(timeRemaining / 1000);
         
-        // Update the displayed time
-        setTimeLeft(secondsLeft);
-        
-        // Only end the timer when we're truly at zero with a small buffer for interval timing
-        if (timeRemaining <= 50) { // Small buffer for interval timing
-          console.log(`[${APP_VERSION}] Timer completed at ${new Date().toISOString()} (end time was ${new Date(cardEndTimeRef.current).toISOString()})`);
+        // Only end the timer when we're truly at zero
+        if (timeRemaining <= 50) {
+          console.log(`[${APP_VERSION}] Timer completed naturally at ${new Date().toISOString()}`);
           
           // Clear the interval first to prevent multiple triggers
           clearInterval(timerRef.current);
           timerRef.current = null;
           
           // Update state
-          setTimerStarted(false);
-          setTimeLeft(0);
           setWaitingForCard(true);
+          setCard(null);
           
-          // CRITICAL: Add a small delay before marking as ready for next card
-          // This ensures the UI has updated and prevents race conditions
-          setTimeout(() => {
-            console.log(`[${APP_VERSION}] Marking player as ready for next card after delay`);
-            updatePlayerStatus({ 
-              ready_for_card: true,
-              card_ended_at: new Date().toISOString()
-            });
-          }, 1000);
+          // Mark as ready for next card when timer actually completes
+          updatePlayerStatus({ 
+            ready_for_card: true,
+            card_ended_at: new Date().toISOString()
+          });
         }
-      }, 100); // Update very frequently for smoother countdown and accuracy
+      }, 100);
     } else {
       // Card already expired
       console.log(`[${APP_VERSION}] Card already expired`);
-      setTimerStarted(false);
       setWaitingForCard(true);
-      
-      // CRITICAL: Add a small delay before marking as ready for next card
-      setTimeout(() => {
-        updatePlayerStatus({ 
-          ready_for_card: true,
-          card_ended_at: new Date().toISOString()
-        });
-      }, 1000);
+      updatePlayerStatus({ 
+        ready_for_card: true,
+        card_ended_at: new Date().toISOString()
+      });
     }
-    
-    processingCardRef.current = false;
   };
 
   useEffect(() => {
@@ -479,16 +436,23 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           } else {
             console.log(`[${APP_VERSION}] No initial card found, waiting for card`);
             setWaitingForCard(true);
-            
-            // Mark as ready for card if no current card
-            await updatePlayerStatus({
-              active: true,
-              ready_for_card: true
-            });
           }
+          
+          // Mark player as active and ready for cards if needed
+          const readyForCard = !playerData.current_card || 
+                              playerData.current_card === 'END' || 
+                              (playerData.card_start_time && playerData.card_duration && 
+                               new Date(playerData.card_start_time).getTime() + 
+                               (playerData.card_duration * 1000) < Date.now());
+          
+          await updatePlayerStatus({
+            active: true,
+            last_seen: new Date().toISOString(),
+            ready_for_card: readyForCard
+          });
         } catch (playerError) {
           console.error(`[${APP_VERSION}] Error getting player data:`, playerError);
-          setError('Error connecting to session. Please try refreshing the page.');
+          setError('Error connecting to session');
           setLoading(false);
           return;
         }
@@ -530,6 +494,35 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         
         playerSubscriptionRef.current = unsubscribe;
         
+        // Additional periodic check for card updates in case subscription fails
+        const cardCheckInterval = setInterval(async () => {
+          try {
+            const latestPlayers = await room.collection('player')
+              .filter({ id: playerId })
+              .getList();
+              
+            if (latestPlayers.length > 0) {
+              const latestPlayer = latestPlayers[0];
+              
+              // Only process if different from current
+              if (playerRef.current?.current_card !== latestPlayer.current_card ||
+                  playerRef.current?.card_start_time !== latestPlayer.card_start_time) {
+                
+                console.log(`[${APP_VERSION}] Detected card change from periodic check:`, {
+                  id: latestPlayer.id,
+                  current_card: latestPlayer.current_card,
+                  card_start_time: latestPlayer.card_start_time
+                });
+                
+                playerRef.current = latestPlayer;
+                handleCardDisplay(latestPlayer);
+              }
+            }
+          } catch (error) {
+            console.error(`[${APP_VERSION}] Error in periodic card check:`, error);
+          }
+        }, 8000);
+        
         // Heartbeat to keep player active
         const heartbeatInterval = setInterval(async () => {
           await updatePlayerStatus({ 
@@ -542,10 +535,11 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         
         return () => {
           clearInterval(heartbeatInterval);
+          clearInterval(cardCheckInterval);
         };
       } catch (error) {
         console.error(`[${APP_VERSION}] Error initializing player view:`, error);
-        setError('Error connecting to session. Please try refreshing the page.');
+        setError('Error connecting to session');
         setLoading(false);
       }
     };
@@ -572,70 +566,32 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     };
   }, [pin, name, playerId]);
 
+  // Simplified player view - just the card text or loading dots
   return (
     <div className="container">
-      <div className={`card ${card && card.isEnd ? 'session-ended' : ''}`}>
-        <h2 className="header">
-          {loading ? 'Connecting...' : name}
-        </h2>
-        
-        {loading && (
+      <div className="card">
+        {loading ? (
           <div className="waiting-animation">
             <div className="dot"></div>
             <div className="dot"></div>
             <div className="dot"></div>
           </div>
-        )}
-        
-        {error && (
+        ) : error ? (
           <div className="error">{error}</div>
-        )}
-        
-        {!loading && !error && (
+        ) : (
           <>
             {waitingForCard ? (
-              <div className="card-content">
-                <div className="next-card-notice">
-                  <span className="emoji">⏳</span> Waiting for next card...
-                  <br />
-                  The conductor will distribute a card shortly.
-                </div>
-                
-                <div className="waiting-animation">
-                  <div className="dot"></div>
-                  <div className="dot"></div>
-                  <div className="dot"></div>
-                </div>
+              <div className="waiting-animation">
+                <div className="dot"></div>
+                <div className="dot"></div>
+                <div className="dot"></div>
               </div>
             ) : (
               <div className={`card-content ${card !== null ? 'card-new' : ''}`}>
                 {card && (
-                  <>
-                    <div className="card-text">
-                      {card.text}
-                    </div>
-                    
-                    {!card.isEnd && (
-                      <>
-                        <div style={{ textAlign: 'center', margin: '10px 0', color: 'var(--text-light)' }}>
-                          {card.deckName}
-                        </div>
-                        
-                        <div className="timer-bar">
-                          <div 
-                            className={`timer-progress ${timeLeft === 0 ? 'timer-expired' : ''}`}
-                            style={{ 
-                              width: `${Math.max(0, Math.min(100, (timeLeft / card.duration) * 100))}%` 
-                            }}
-                          ></div>
-                        </div>
-                        
-                        <div style={{ textAlign: 'center', fontSize: '18px', fontWeight: 'bold' }}>
-                          {timeLeft} seconds
-                        </div>
-                      </>
-                    )}
-                  </>
+                  <div className="card-text">
+                    {card.text}
+                  </div>
                 )}
               </div>
             )}
@@ -660,7 +616,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           }}
           style={{ marginTop: '20px' }}
         >
-          Leave Session
+          Leave
         </button>
       </div>
     </div>
@@ -760,7 +716,7 @@ function ConductorView({ onNavigate }) {
       playersSubscriptionRef.current = unsubscribe;
     } catch (error) {
       console.error(`[${APP_VERSION}] Error setting up player subscription:`, error);
-      setError('Error setting up player tracking. Try refreshing the page.');
+      setError('Error setting up player tracking');
     }
   }, [pin]);
 
@@ -979,7 +935,7 @@ function ConductorView({ onNavigate }) {
         fileInputRef.current.value = '';
       }
 
-      setSuccess(`Upload complete! Added ${successCount} deck${successCount !== 1 ? 's' : ''}, failed ${errorCount}`);
+      setSuccess(`Upload complete! Added ${successCount} deck${successCount !== 1 ? 's' : ''}`);
       setTimeout(() => setSuccess(''), 3000);
     } catch (error) {
       setError('Failed to process file');
@@ -1035,7 +991,7 @@ function ConductorView({ onNavigate }) {
     }
   };
 
-  // IMPROVED: Completely rewritten card distribution with strict timing enforcement
+  // Card distribution function
   const distributeCardToPlayer = async (player) => {
     if (!sessionId || !selectedDeck) {
       console.log(`[${APP_VERSION}] Cannot distribute: missing session or deck`);
@@ -1061,9 +1017,8 @@ function ConductorView({ onNavigate }) {
         return false;
       }
 
-      console.log(`[${APP_VERSION}] IMPROVED: Distributing card to player ${player.id} (${player.name})`);
+      console.log(`[${APP_VERSION}] Distributing card to player ${player.id} (${player.name})`);
       
-      // Use the improved distributeCard function from utils.js
       const result = await distributeCard(
         player, 
         selectedDeckData, 
@@ -1122,7 +1077,7 @@ function ConductorView({ onNavigate }) {
     };
   }, [pin, setupPlayerSubscription]);
 
-  // FIXED: Completely rewritten auto-distribution to prevent premature card distribution
+  // Auto-distribution setup
   useEffect(() => {
     // Clean up previous interval
     if (autoDistributeIntervalRef.current) {
@@ -1138,17 +1093,17 @@ function ConductorView({ onNavigate }) {
         // Get precise current time
         const now = Date.now();
         
-        // Find players who genuinely need cards with strict validation
+        // Find players who genuinely need cards
         const playersNeedingCards = players.filter(player => {
           // Skip inactive players
           if (!player.active) return false;
           
-          // CRITICAL: Only distribute to players explicitly marked as ready
-          if (player.ready_for_card !== true) {
-            return false;
+          // If explicitly ready for a card, allow distribution
+          if (player.ready_for_card === true) {
+            return true;
           }
           
-          // If no card, player needs one (as long as they're ready)
+          // If no card, player needs one
           if (!player.current_card) {
             return true;
           }
@@ -1167,9 +1122,8 @@ function ConductorView({ onNavigate }) {
           const cardStartTime = new Date(player.card_start_time).getTime();
           const cardEndTime = cardStartTime + (player.card_duration * 1000);
           
-          // Add a significant buffer (3 seconds) to ensure the timer has fully completed
-          // and any network delays in updating ready_for_card have resolved
-          return now > (cardEndTime + 3000);
+          // Add a 1-second buffer to ensure the timer has fully completed
+          return now > (cardEndTime + 1000);
         });
         
         // Only proceed if we found players genuinely needing cards
@@ -1188,11 +1142,11 @@ function ConductorView({ onNavigate }) {
             console.log(`[${APP_VERSION}] Auto-distributing card to player ${player.name} (${player.id})`);
             await distributeCardToPlayer(player);
             
-            // Increased delay between distributions to prevent overloading and race conditions
-            await new Promise(resolve => setTimeout(resolve, 1500));
+            // Small delay between distributions to prevent overloading
+            await new Promise(resolve => setTimeout(resolve, 800));
           }
         }
-      }, 3000); // Reduced check frequency to prevent rapid distribution
+      }, 2000); // Check frequently but not too frequently
     }
     
     return () => {
@@ -1418,7 +1372,7 @@ function ConductorView({ onNavigate }) {
             onClick={() => onNavigate('home')}
             style={{ marginTop: '20px' }}
           >
-            Back to Home
+            Back
           </button>
         </div>
       </div>
@@ -1733,7 +1687,7 @@ function ConductorView({ onNavigate }) {
         {players.length > 0 ? (
           <div className="player-grid">
             {players.map(player => {
-              // Calculate remaining time for display
+              // Calculate remaining time for conductor view only
               let timeRemaining = null;
               if (player.current_card && player.current_card !== 'END' && player.card_start_time && player.card_duration) {
                 const cardStartTime = new Date(player.card_start_time).getTime();
