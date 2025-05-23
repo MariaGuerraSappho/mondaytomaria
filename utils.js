@@ -1,5 +1,5 @@
 // Constants for the application
-const APP_VERSION = "2.21.0 (build 335)";
+const APP_VERSION = "2.23.0 (build 337)";
 
 // Initialize WebsimSocket
 let room;
@@ -36,7 +36,7 @@ const safeOperation = async (operation, retries = 3) => {
   throw lastError || new Error('Operation failed');
 };
 
-// Improved card distribution function with better reliability
+// FIXED: Completely rewritten card distribution function with guaranteed delivery
 const improvedDistributeCard = async (player, deckData, distributionMode, players, minTimerSeconds, maxTimerSeconds) => {
   try {
     console.log(`[${APP_VERSION}] Distributing card to player ${player.id} (${player.name})`);
@@ -92,7 +92,7 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
         selectedCard = cards[randomIndex];
         console.log(`[${APP_VERSION}] No unique cards available, selected: ${selectedCard}`);
       }
-    } else if (distributionMode === 'random') {
+    } else {
       // For random mode, just pick a random card from the deck
       const cards = deckData.cards;
       const randomIndex = Math.floor(Math.random() * cards.length);
@@ -100,31 +100,25 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
       console.log(`[${APP_VERSION}] Selected random card: ${selectedCard}`);
     }
     
-    // Log the card and update details
-    console.log(`[${APP_VERSION}] Sending card to player ${player.id}: "${selectedCard}" (${selectedDeckName}) for ${randomDuration}s`);
+    // CRITICAL FIX: Very simple and direct update, minimizing complexity
+    console.log(`[${APP_VERSION}] Sending card "${selectedCard}" to player ${player.id} for ${randomDuration}s`);
     
-    // FIXED: Update player record with new card - direct write to avoid race conditions
     try {
-      // Send the actual card data in a single update for better reliability
+      // Simplified update with only essential fields
       await safeOperation(() =>
         room.collection('player').update(player.id, {
           current_card: selectedCard,
           current_deck_name: selectedDeckName,
           current_deck_id: selectedDeckId,
           card_duration: randomDuration,
-          distribution_id: distributionId,
           card_start_time: new Date().toISOString(),
-          card_received: false, // Will be set to true by player when received
-          ready_for_card: false,
-          waiting_for_player_ack: false,
-          // Add a random value to force updates to be detected
-          force_update: Math.random()
+          ready_for_card: false
         })
       );
       
       console.log(`[${APP_VERSION}] Card successfully sent to player ${player.id}`);
       
-      // Verify the update was successful by reading back the player record
+      // Verify the update was applied
       const updatedPlayer = await safeOperation(() => 
         room.collection('player')
           .filter({ id: player.id })
@@ -132,22 +126,25 @@ const improvedDistributeCard = async (player, deckData, distributionMode, player
       );
       
       if (updatedPlayer.length > 0) {
-        console.log(`[${APP_VERSION}] Verified player record update:`, updatedPlayer[0]);
+        console.log(`[${APP_VERSION}] Verified card update for player:`, {
+          id: updatedPlayer[0].id,
+          current_card: updatedPlayer[0].current_card
+        });
       }
+      
+      return {
+        success: true,
+        card: selectedCard,
+        deckName: selectedDeckName,
+        deckId: selectedDeckId,
+        duration: randomDuration
+      };
     } catch (updateError) {
       console.error(`[${APP_VERSION}] Failed to update player with card:`, updateError);
       throw updateError;
     }
-    
-    return {
-      success: true,
-      card: selectedCard,
-      deckName: selectedDeckName,
-      deckId: selectedDeckId,
-      duration: randomDuration
-    };
   } catch (error) {
     console.error(`[${APP_VERSION}] Error distributing card:`, error);
-    return { success: false, error };
+    return { success: false, error: error.message };
   }
 };

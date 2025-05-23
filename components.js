@@ -245,7 +245,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
     }
   };
 
-  // FIXED: Handle card display with better debugging and reliability
+  // Fixed: Completely rewritten card display function for reliability
   const handleCardDisplay = (playerData) => {
     console.log(`[${APP_VERSION}] Processing card update for player:`, playerData);
     
@@ -255,40 +255,49 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       timerRef.current = null;
     }
     
-    if (!playerData.current_card || playerData.current_card === 'END') {
-      if (playerData.current_card === 'END') {
-        console.log(`[${APP_VERSION}] Session ended notification received`);
-        setCard({ text: 'Session Ended', isEnd: true });
-        setWaitingForCard(false);
-      } else {
-        console.log(`[${APP_VERSION}] No card present, waiting for card`);
-        setWaitingForCard(true);
-        setCard(null);
-      }
+    // Check if player has a card
+    if (!playerData.current_card) {
+      console.log(`[${APP_VERSION}] No card present, waiting for card`);
+      setWaitingForCard(true);
+      setCard(null);
+      return;
+    }
+    
+    // Handle session end signal
+    if (playerData.current_card === 'END') {
+      console.log(`[${APP_VERSION}] Session ended notification received`);
+      setCard({ text: 'Session Ended', isEnd: true });
+      setWaitingForCard(false);
       return;
     }
     
     // Create the card object
-    const newCard = {
-      text: playerData.current_card,
-      deckName: playerData.current_deck_name || 'Unknown',
-      startTime: new Date(playerData.card_start_time || new Date()),
-      duration: playerData.card_duration || 30,
-    };
+    const cardText = playerData.current_card;
+    const deckName = playerData.current_deck_name || 'Unknown';
+    const startTime = new Date(playerData.card_start_time || new Date());
+    const duration = playerData.card_duration || 30;
     
-    console.log(`[${APP_VERSION}] Displaying new card:`, newCard);
+    console.log(`[${APP_VERSION}] Displaying card: "${cardText}" from deck "${deckName}" with duration ${duration}s`);
+    
+    // Create the new card object
+    const newCard = {
+      text: cardText,
+      deckName: deckName,
+      startTime: startTime,
+      duration: duration,
+    };
     
     // Update the UI to show the card
     setCard(newCard);
     
     // Calculate time left
-    const startTime = new Date(playerData.card_start_time || new Date()).getTime();
-    const endTime = startTime + (playerData.card_duration * 1000);
+    const cardStartTime = startTime.getTime();
+    const cardEndTime = cardStartTime + (duration * 1000);
     const now = Date.now();
-    const remaining = Math.max(0, endTime - now);
+    const remaining = Math.max(0, cardEndTime - now);
     const secondsRemaining = Math.ceil(remaining / 1000);
     
-    console.log(`[${APP_VERSION}] Card timer: ${secondsRemaining}s remaining out of ${playerData.card_duration}s`);
+    console.log(`[${APP_VERSION}] Card timer: ${secondsRemaining}s remaining out of ${duration}s`);
     
     setTimeLeft(secondsRemaining);
     setWaitingForCard(false);
@@ -360,8 +369,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         
         setSession(sessionData);
         
-        // Check if player exists
-        let playerData;
+        // Check if player exists and get current state
         try {
           const players = await room.collection('player')
             .filter({ id: playerId })
@@ -373,15 +381,23 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             return;
           }
           
-          playerData = players[0];
+          const playerData = players[0];
           playerRef.current = playerData;
+          
+          // Fixed: Important - Process any existing card immediately
+          if (playerData.current_card) {
+            console.log(`[${APP_VERSION}] Found existing card to display: ${playerData.current_card}`);
+            handleCardDisplay(playerData);
+          } else {
+            console.log(`[${APP_VERSION}] No initial card found, waiting for card`);
+            setWaitingForCard(true);
+          }
           
           // Mark player as active and ready for cards
           await updatePlayerStatus({
             active: true,
             last_seen: new Date().toISOString(),
-            view_initialized: true,
-            ready_for_card: true
+            ready_for_card: !playerData.current_card || playerData.current_card === 'END'
           });
         } catch (playerError) {
           console.error(`[${APP_VERSION}] Error getting player data:`, playerError);
@@ -390,40 +406,30 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
           return;
         }
         
-        // FIXED: Process initial card data immediately
-        if (playerData.current_card) {
-          console.log(`[${APP_VERSION}] Found initial card: ${playerData.current_card}`);
-          handleCardDisplay(playerData);
-        } else {
-          console.log(`[${APP_VERSION}] No initial card found, waiting for card`);
-          setWaitingForCard(true);
-          await updatePlayerStatus({ ready_for_card: true });
-        }
-        
-        // FIXED: Set up more reliable subscription for player updates
+        // Critical fix: Set up more reliable subscription
         console.log(`[${APP_VERSION}] Setting up player subscription for id: ${playerId}`);
         
-        // Clear any existing subscription
         if (playerSubscriptionRef.current) {
           playerSubscriptionRef.current();
         }
         
-        // Create a direct subscription to the player record
         const unsubscribe = room.collection('player')
           .filter({ id: playerId })
           .subscribe(updatedPlayers => {
-            if (updatedPlayers.length === 0) {
-              console.log(`[${APP_VERSION}] Subscription update: No players found`);
-              return;
-            }
+            if (!updatedPlayers || updatedPlayers.length === 0) return;
             
             const updatedPlayer = updatedPlayers[0];
-            console.log(`[${APP_VERSION}] Player subscription update received:`, updatedPlayer);
+            console.log(`[${APP_VERSION}] Player update received:`, {
+              id: updatedPlayer.id,
+              current_card: updatedPlayer.current_card,
+              card_start_time: updatedPlayer.card_start_time,
+              card_duration: updatedPlayer.card_duration
+            });
             
             // Store the latest player data
             playerRef.current = updatedPlayer;
             
-            // Process card updates
+            // Critical fix: Always process card updates
             handleCardDisplay(updatedPlayer);
           });
         
