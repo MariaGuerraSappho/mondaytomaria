@@ -1,5 +1,5 @@
 // App version
-const APP_VERSION = "2.24.5 (build 344)";
+const APP_VERSION = "2.24.6 (build 345)";
 
 const { useState, useEffect } = React;
 const { createRoot } = ReactDOM;

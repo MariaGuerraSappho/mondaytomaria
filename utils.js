@@ -69,20 +69,28 @@ const distributeCard = async (player, deckData, distributionMode, players, minTi
     
     // Choose card based on distribution mode
     if (distributionMode === 'unison') {
-      // Use existing active card if available
-      const activeUnison = players.find(p => 
-        p.current_card && p.current_card !== 'END' && 
-        p.id !== player.id && 
+      // FIXED: Unison mode - search for ANY active player with a card first
+      const activePlayers = players.filter(p => 
+        p.current_card && 
+        p.current_card !== 'END' && 
+        p.card_start_time && 
         new Date(p.card_start_time).getTime() + (p.card_duration * 1000) > Date.now()
       );
       
-      if (activeUnison && activeUnison.current_card) {
-        selectedCard = activeUnison.current_card;
-        selectedDeckName = activeUnison.current_deck_name;
-        selectedDeckId = activeUnison.current_deck_id;
-        console.log(`[${APP_VERSION}] Using unison card: ${selectedCard}`);
+      if (activePlayers.length > 0) {
+        // Get the most recent card (highest timestamp)
+        const mostRecentPlayer = activePlayers.reduce((latest, current) => {
+          const latestTime = new Date(latest.card_start_time).getTime();
+          const currentTime = new Date(current.card_start_time).getTime();
+          return currentTime > latestTime ? current : latest;
+        }, activePlayers[0]);
+        
+        selectedCard = mostRecentPlayer.current_card;
+        selectedDeckName = mostRecentPlayer.current_deck_name || deckData.name;
+        selectedDeckId = mostRecentPlayer.current_deck_id || deckData.id;
+        console.log(`[${APP_VERSION}] Using unison card from player ${mostRecentPlayer.name}: ${selectedCard}`);
       } else {
-        // Select a new card for everyone
+        // No active cards, select a new card for everyone
         const cards = deckData.cards;
         const randomIndex = Math.floor(Math.random() * cards.length);
         selectedCard = cards[randomIndex];

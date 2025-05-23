@@ -46,9 +46,12 @@ function JoinView({ onNavigate, initialPin = '' }) {
     try {
       console.log(`[${APP_VERSION}] Validating session PIN: ${pin}`);
       
+      // FIXED: Simplified PIN filtering to handle numerical pins
+      const cleanPin = pin.trim().replace(/\D/g, ''); // Remove any non-digit characters
+      
       const sessions = await safeOperation(() => 
         room.collection('session')
-          .filter({ pin: pin.trim() })
+          .filter({ pin: cleanPin })
           .getList()
       );
       
@@ -104,10 +107,13 @@ function JoinView({ onNavigate, initialPin = '' }) {
       setLoading(true);
       setError('');
       
+      // FIXED: Ensure we're using the clean PIN format consistently
+      const cleanPin = pin.trim().replace(/\D/g, '');
+      
       // Check if player has an existing ID in this session
       const existingPlayers = await safeOperation(() => 
         room.collection('player')
-          .filter({ session_pin: pin.trim(), name: name.trim() })
+          .filter({ session_pin: cleanPin, name: name.trim() })
           .getList()
       );
       
@@ -132,7 +138,7 @@ function JoinView({ onNavigate, initialPin = '' }) {
         const player = await safeOperation(() => 
           room.collection('player').create({
             name: name.trim(),
-            session_pin: pin.trim(),
+            session_pin: cleanPin,
             active: true,
             last_seen: new Date().toISOString(),
             current_card: null,
@@ -148,7 +154,7 @@ function JoinView({ onNavigate, initialPin = '' }) {
       localStorage.setItem('playerId', playerId);
       
       // Navigate to player view
-      onNavigate('player', { pin: pin.trim(), name: name.trim(), playerId });
+      onNavigate('player', { pin: cleanPin, name: name.trim(), playerId });
     } catch (error) {
       console.error(`[${APP_VERSION}] Error joining session:`, error);
       setError('Error joining session. Please try again.');
@@ -231,7 +237,7 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
   const playerSubscriptionRef = useRef(null);
   const cardEndTimeRef = useRef(null);
   const lastCardRef = useRef(null);
-
+  
   // Update player status
   const updatePlayerStatus = async (statusUpdate) => {
     if (!playerId) return;
@@ -668,6 +674,16 @@ function ConductorView({ onNavigate }) {
           .filter({ session_pin: pin })
           .getList()
       );
+      
+      // Enhanced logging for debugging card information
+      console.log(`[${APP_VERSION}] Refreshed player list:`, playerList.map(p => ({
+        id: p.id,
+        name: p.name, 
+        card: p.current_card,
+        start: p.card_start_time,
+        duration: p.card_duration
+      })));
+      
       setPlayers(playerList);
       setSuccess('Player list refreshed');
       setTimeout(() => setSuccess(''), 2000);
@@ -1745,7 +1761,8 @@ function ConductorView({ onNavigate }) {
               return (
                 <div key={player.id} className="player-card-mini" style={{
                   border: player.current_card ? '2px solid var(--primary)' : '1px solid var(--border)',
-                  opacity: player.active ? 1 : 0.6
+                  opacity: player.active ? 1 : 0.6,
+                  backgroundColor: player.current_card ? 'rgba(255, 78, 138, 0.05)' : '#fff'
                 }}>
                   <div className="player-name" style={{
                     display: 'flex',
@@ -1766,7 +1783,7 @@ function ConductorView({ onNavigate }) {
                         {timeRemaining !== null && (
                           <span style={{
                             fontWeight: 'bold',
-                            color: timeRemaining < 5 ? 'var(--error)' : 'var(--accent)'
+                            color: timeRemaining < 5 ? 'var(--error)' : 'var(--accent)'// eslint-disable-next-line
                           }}>
                             {timeRemaining}s
                           </span>
