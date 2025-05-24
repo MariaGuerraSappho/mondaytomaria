@@ -277,8 +277,8 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
       return;
     }
     
-    // Handle session end signal
-    if (playerData.current_card === 'END') {
+    // Handle session end signal - this is now persistent with session_ended flag
+    if (playerData.current_card === 'END' || playerData.session_ended === true) {
       console.log(`[${APP_VERSION}] Session ended notification received`);
       setCard({ text: 'Session Ended', isEnd: true });
       setWaitingForCard(false);
@@ -404,7 +404,9 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
         const sessionData = sessions[0];
         
         if (sessionData.ended) {
-          setError('This session has ended');
+          // Session is ended, show the END state immediately
+          setCard({ text: 'Session Ended', isEnd: true });
+          setWaitingForCard(false);
           setLoading(false);
           return;
         }
@@ -432,8 +434,18 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             name: playerData.name,
             current_card: playerData.current_card,
             card_start_time: playerData.card_start_time,
-            card_duration: playerData.card_duration
+            card_duration: playerData.card_duration,
+            session_ended: playerData.session_ended
           });
+          
+          // Check for session ended state first
+          if (playerData.session_ended === true || playerData.current_card === 'END') {
+            console.log(`[${APP_VERSION}] Session ended state detected for player`);
+            setCard({ text: 'Session Ended', isEnd: true });
+            setWaitingForCard(false);
+            setLoading(false);
+            return;
+          }
           
           // Process any existing card immediately
           if (playerData.current_card) {
@@ -714,22 +726,18 @@ function ConductorView({ onNavigate }) {
         .subscribe(updatedPlayers => {
           console.log(`[${APP_VERSION}] Player subscription update received with ${updatedPlayers.length} players`);
           setPlayers(prevPlayers => {
-            // Deep comparison to ensure we're actually updating the state
-            const playersChanged = JSON.stringify(prevPlayers) !== JSON.stringify(updatedPlayers);
-            if (playersChanged) {
-              console.log(`[${APP_VERSION}] Updating players state with new data`);
-              return updatedPlayers;
-            }
-            return prevPlayers;
+            // Always update to ensure we get fresh data
+            console.log(`[${APP_VERSION}] Updating players state with new data`);
+            return updatedPlayers;
           });
         });
 
       playersSubscriptionRef.current = unsubscribe;
       
-      // Add periodic forced refresh to ensure view stays updated
+      // Add more frequent periodic forced refresh to ensure view stays updated
       const periodicRefresh = setInterval(() => {
         refreshPlayerList(false); // Silent refresh (no success message)
-      }, 5000);
+      }, 3000); // More frequent refreshes
       
       return () => {
         clearInterval(periodicRefresh);
@@ -947,6 +955,8 @@ function ConductorView({ onNavigate }) {
 
           setDecks(prevDecks => [deck, ...prevDecks]);
           setSelectedDeck(deck.id);
+          setNewDeckName('');
+          setNewDeckCards('');
           successCount = 1;
         } catch (err) {
           errorCount = 1;
@@ -1062,7 +1072,9 @@ function ConductorView({ onNavigate }) {
                 room.collection('player').update(player.id, {
                   current_card: 'END',
                   card_start_time: new Date().toISOString(),
-                  ready_for_card: false
+                  ready_for_card: false,
+                  session_ended: true,  // Add persistent flag for session end
+                  session_ended_at: new Date().toISOString()
                 })
               );
             } catch (err) {

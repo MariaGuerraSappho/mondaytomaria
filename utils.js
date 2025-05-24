@@ -39,6 +39,15 @@ const safeOperation = async (operation, retries = 3) => {
 // Card distribution function with strict mode enforcement
 const distributeCard = async (player, deckData, distributionMode, players, minTimerSeconds, maxTimerSeconds, sharedCard = null) => {
   try {
+    // Check if session is ended for this player first
+    if (player.session_ended === true) {
+      console.log(`[${APP_VERSION}] SKIPPED: Player ${player.name} is in an ended session state`);
+      return {
+        success: false,
+        reason: 'SESSION_ENDED'
+      };
+    }
+    
     console.log(`[${APP_VERSION}] Distributing card to player ${player.id} (${player.name}) in mode: ${distributionMode}`);
     
     // First, check if player already has an active card with remaining time
