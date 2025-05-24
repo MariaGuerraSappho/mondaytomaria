@@ -633,6 +633,8 @@ function ConductorView({ onNavigate }) {
   const autoDistributeIntervalRef = useRef(null);
   const endCountdownRef = useRef(null);
   const pendingDistributionsRef = useRef(new Set()); // Track players with pending distribution
+  const [unisonCardSequence, setUnisonCardSequence] = useState([]);
+  const [unisonCardIndex, setUnisonCardIndex] = useState(0);
 
   // Load decks
   useEffect(() => {
@@ -1181,6 +1183,13 @@ function ConductorView({ onNavigate }) {
       setLoading(true);
       setDistributionMode(newMode);
       
+      // Reset unison sequence when switching modes
+      if (newMode === 'unison') {
+        // Only reset if switching to unison
+        setUnisonCardSequence([]);
+        setUnisonCardIndex(0);
+      }
+      
       // Update session with new mode
       await safeOperation(() =>
         room.collection('session').update(sessionId, {
@@ -1231,14 +1240,23 @@ function ConductorView({ onNavigate }) {
       // Brief delay to allow updates to process
       await new Promise(resolve => setTimeout(resolve, 1000));
       
-      // For unison mode, select one card for all players
+      // For unison mode, select one card for all players and maintain sequence
       let sharedCard = null;
       if (mode === 'unison') {
         const selectedDeckData = decks.find(d => d.id === selectedDeck);
         if (selectedDeckData && selectedDeckData.cards && selectedDeckData.cards.length > 0) {
-          const randomIndex = Math.floor(Math.random() * selectedDeckData.cards.length);
-          sharedCard = selectedDeckData.cards[randomIndex];
-          console.log(`[${APP_VERSION}] Selected shared unison card: ${sharedCard}`);
+          if (unisonCardSequence.length === 0) {
+            // Initialize a new card sequence
+            const newSequence = generateCardSequence(selectedDeckData.cards, 10);
+            setUnisonCardSequence(newSequence);
+            sharedCard = newSequence[0];
+            setUnisonCardIndex(0);
+          } else {
+            // Reset to first card in sequence for manual distribution
+            sharedCard = unisonCardSequence[0];
+            setUnisonCardIndex(0);
+          }
+          console.log(`[${APP_VERSION}] Selected shared unison card: "${sharedCard}" (from sequence)`);
         }
       }
       
@@ -1264,20 +1282,15 @@ function ConductorView({ onNavigate }) {
     }
   };
 
-  // Subscribe to players when pin changes
-  useEffect(() => {
-    if (pin) {
-      setupPlayerSubscription();
-      refreshPlayerList(); // Initial fetch only
+  // Helper function to generate card sequence
+  const generateCardSequence = (cards, count = 10) => {
+    const sequence = [];
+    for (let i = 0; i < count; i++) {
+      const randomIndex = Math.floor(Math.random() * cards.length);
+      sequence.push(cards[randomIndex]);
     }
-
-    return () => {
-      if (playersSubscriptionRef.current) {
-        playersSubscriptionRef.current();
-        playersSubscriptionRef.current = null;
-      }
-    };
-  }, [pin, setupPlayerSubscription]);
+    return sequence;
+  };
 
   // Auto-distribution setup
   useEffect(() => {
@@ -1333,14 +1346,26 @@ function ConductorView({ onNavigate }) {
           console.log(`[${APP_VERSION}] Auto-distributing cards to ${playersNeedingCards.length} players:`, 
             playersNeedingCards.map(p => p.name));
           
-          // For unison mode, select one card for all players
+          // For unison mode, maintain card sequence
           let sharedCard = null;
           if (distributionMode === 'unison') {
             const selectedDeckData = decks.find(d => d.id === selectedDeck);
             if (selectedDeckData && selectedDeckData.cards && selectedDeckData.cards.length > 0) {
-              const randomIndex = Math.floor(Math.random() * selectedDeckData.cards.length);
-              sharedCard = selectedDeckData.cards[randomIndex];
-              console.log(`[${APP_VERSION}] Selected shared unison card for auto-distribution: ${sharedCard}`);
+              // Use the card sequence if it exists, otherwise create a new one
+              if (unisonCardSequence.length === 0) {
+                // Initialize card sequence
+                const newSequence = generateCardSequence(selectedDeckData.cards, 10); // Generate 10 cards
+                setUnisonCardSequence(newSequence);
+                sharedCard = newSequence[0];
+                setUnisonCardIndex(0);
+              } else {
+                // Get next card in sequence
+                const nextIndex = unisonCardIndex < unisonCardSequence.length - 1 ? 
+                                  unisonCardIndex + 1 : 0;
+                sharedCard = unisonCardSequence[nextIndex];
+                setUnisonCardIndex(nextIndex);
+              }
+              console.log(`[${APP_VERSION}] Using unison card sequence: card ${unisonCardIndex + 1}/${unisonCardSequence.length}: "${sharedCard}"`);
             }
           }
           
@@ -1372,7 +1397,7 @@ function ConductorView({ onNavigate }) {
         autoDistributeIntervalRef.current = null;
       }
     };
-  }, [step, autoDistribute, players, selectedDeck, distributionMode, minTimerSeconds, maxTimerSeconds, pin]);
+  }, [step, autoDistribute, players, selectedDeck, distributionMode, minTimerSeconds, maxTimerSeconds, pin, unisonCardSequence, unisonCardIndex]);
 
   // Cleanup on unmount
   useEffect(() => {
