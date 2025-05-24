@@ -1,5 +1,5 @@
 // Constants for the application
-const APP_VERSION = "2.24.5 (build 344)";
+const APP_VERSION = "2.24.7 (build 346)";
 
 // Initialize WebsimSocket
 let room;
@@ -36,10 +36,10 @@ const safeOperation = async (operation, retries = 3) => {
   throw lastError || new Error('Operation failed');
 };
 
-// Card distribution function with strict timing enforcement
-const distributeCard = async (player, deckData, distributionMode, players, minTimerSeconds, maxTimerSeconds) => {
+// Card distribution function with strict mode enforcement
+const distributeCard = async (player, deckData, distributionMode, players, minTimerSeconds, maxTimerSeconds, sharedCard = null) => {
   try {
-    console.log(`[${APP_VERSION}] Distributing card to player ${player.id} (${player.name})`);
+    console.log(`[${APP_VERSION}] Distributing card to player ${player.id} (${player.name}) in mode: ${distributionMode}`);
     
     // First, check if player already has an active card with remaining time
     if (player.current_card && player.current_card !== 'END' && player.card_start_time && player.card_duration) {
@@ -69,28 +69,12 @@ const distributeCard = async (player, deckData, distributionMode, players, minTi
     
     // Choose card based on distribution mode
     if (distributionMode === 'unison') {
-      // FIXED: Unison mode - search for ANY active player with a card first
-      const activePlayers = players.filter(p => 
-        p.current_card && 
-        p.current_card !== 'END' && 
-        p.card_start_time && 
-        new Date(p.card_start_time).getTime() + (p.card_duration * 1000) > Date.now()
-      );
-      
-      if (activePlayers.length > 0) {
-        // Get the most recent card (highest timestamp)
-        const mostRecentPlayer = activePlayers.reduce((latest, current) => {
-          const latestTime = new Date(latest.card_start_time).getTime();
-          const currentTime = new Date(current.card_start_time).getTime();
-          return currentTime > latestTime ? current : latest;
-        }, activePlayers[0]);
-        
-        selectedCard = mostRecentPlayer.current_card;
-        selectedDeckName = mostRecentPlayer.current_deck_name || deckData.name;
-        selectedDeckId = mostRecentPlayer.current_deck_id || deckData.id;
-        console.log(`[${APP_VERSION}] Using unison card from player ${mostRecentPlayer.name}: ${selectedCard}`);
+      // FIXED: Unison mode - if a sharedCard is provided, use it, otherwise select a new card
+      if (sharedCard) {
+        selectedCard = sharedCard;
+        console.log(`[${APP_VERSION}] Using provided unison card: ${selectedCard}`);
       } else {
-        // No active cards, select a new card for everyone
+        // No shared card provided, select a new one
         const cards = deckData.cards;
         const randomIndex = Math.floor(Math.random() * cards.length);
         selectedCard = cards[randomIndex];
@@ -100,7 +84,7 @@ const distributeCard = async (player, deckData, distributionMode, players, minTi
       // Find a card that no other player currently has
       const cards = deckData.cards;
       const activePlayerCards = players
-        .filter(p => p.current_card && p.current_card !== 'END' && p.id !== player.id)
+        .filter(p => p.active && p.current_card && p.current_card !== 'END' && p.id !== player.id)
         .map(p => p.current_card);
       
       const availableCards = cards.filter(card => !activePlayerCards.includes(card));
@@ -114,7 +98,7 @@ const distributeCard = async (player, deckData, distributionMode, players, minTi
         selectedCard = cards[randomIndex];
         console.log(`[${APP_VERSION}] No unique cards available, selected: ${selectedCard}`);
       }
-    } else {
+    } else if (distributionMode === 'random') {
       // For random mode, just pick a random card from the deck
       const cards = deckData.cards;
       const randomIndex = Math.floor(Math.random() * cards.length);

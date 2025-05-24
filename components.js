@@ -603,8 +603,6 @@ function PlayerView({ pin, name, playerId, onNavigate }) {
             )}
           </>
         )}
-        
-        {/* Leave button removed as requested */}
       </div>
     </div>
   );
@@ -1080,7 +1078,7 @@ function ConductorView({ onNavigate }) {
   };
 
   // Card distribution function
-  const distributeCardToPlayer = async (player) => {
+  const distributeCardToPlayer = async (player, sharedCard = null) => {
     if (!sessionId || !selectedDeck) {
       console.log(`[${APP_VERSION}] Cannot distribute: missing session or deck`);
       return false;
@@ -1105,7 +1103,7 @@ function ConductorView({ onNavigate }) {
         return false;
       }
 
-      console.log(`[${APP_VERSION}] Distributing card to player ${player.id} (${player.name})`);
+      console.log(`[${APP_VERSION}] Distributing card to player ${player.id} (${player.name}) in mode: ${distributionMode}`);
       
       const result = await distributeCard(
         player, 
@@ -1113,7 +1111,8 @@ function ConductorView({ onNavigate }) {
         distributionMode, 
         players,
         minTimerSeconds, 
-        maxTimerSeconds
+        maxTimerSeconds,
+        sharedCard
       );
       
       console.log(`[${APP_VERSION}] Distribution result:`, result);
@@ -1142,11 +1141,96 @@ function ConductorView({ onNavigate }) {
       
       // Remove from pending distributions
       pendingDistributionsRef.current.delete(player.id);
-      return result.success;
+      return result.success ? result.card : null;
     } catch (error) {
       console.error(`[${APP_VERSION}] Error distributing card to ${player.name}:`, error);
       pendingDistributionsRef.current.delete(player.id);
       return false;
+    }
+  };
+
+  // Handle distribution mode change with immediate redistribution
+  const handleDistributionModeChange = async (newMode) => {
+    if (loading || !sessionId) return;
+    
+    try {
+      setLoading(true);
+      setDistributionMode(newMode);
+      
+      // Update session with new mode
+      await safeOperation(() =>
+        room.collection('session').update(sessionId, {
+          distribution_mode: newMode
+        })
+      );
+      
+      // Force immediate redistribution to all players
+      await distributeCardsToAllPlayers(newMode);
+      
+      setSuccess(`Switched to ${newMode} mode and redistributed cards`);
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (error) {
+      setError(`Failed to switch to ${newMode} mode`);
+      console.error('Error switching distribution mode:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Distribute cards to all players with proper mode handling
+  const distributeCardsToAllPlayers = async (mode = distributionMode) => {
+    if (!sessionId || !selectedDeck || players.length === 0) {
+      setError('No players or deck selected');
+      return;
+    }
+
+    try {
+      console.log(`[${APP_VERSION}] Distributing cards to all players in ${mode} mode`);
+      
+      // Force all players to be ready
+      for (const player of players) {
+        if (player.active) {
+          await safeOperation(() =>
+            room.collection('player').update(player.id, {
+              ready_for_card: true
+            })
+          );
+        }
+      }
+      
+      // Brief delay to allow updates to process
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // For unison mode, select one card for all players
+      let sharedCard = null;
+      if (mode === 'unison') {
+        const selectedDeckData = decks.find(d => d.id === selectedDeck);
+        if (selectedDeckData && selectedDeckData.cards && selectedDeckData.cards.length > 0) {
+          const randomIndex = Math.floor(Math.random() * selectedDeckData.cards.length);
+          sharedCard = selectedDeckData.cards[randomIndex];
+          console.log(`[${APP_VERSION}] Selected shared unison card: ${sharedCard}`);
+        }
+      }
+      
+      // Distribute to each active player
+      for (const player of players) {
+        if (player.active) {
+          if (mode === 'unison') {
+            await distributeCardToPlayer(player, sharedCard);
+          } else {
+            await distributeCardToPlayer(player);
+          }
+          // Add delay between distributions
+          await new Promise(resolve => setTimeout(resolve, 800));
+        }
+      }
+      
+      // Refresh player list
+      setTimeout(refreshPlayerList, 2000);
+      
+    } catch (error) {
+      console.error(`[${APP_VERSION}] Error distributing cards to all players:`, error);
+      throw error;
     }
   };
 
@@ -1219,6 +1303,17 @@ function ConductorView({ onNavigate }) {
           console.log(`[${APP_VERSION}] Auto-distributing cards to ${playersNeedingCards.length} players:`, 
             playersNeedingCards.map(p => p.name));
           
+          // For unison mode, select one card for all players
+          let sharedCard = null;
+          if (distributionMode === 'unison') {
+            const selectedDeckData = decks.find(d => d.id === selectedDeck);
+            if (selectedDeckData && selectedDeckData.cards && selectedDeckData.cards.length > 0) {
+              const randomIndex = Math.floor(Math.random() * selectedDeckData.cards.length);
+              sharedCard = selectedDeckData.cards[randomIndex];
+              console.log(`[${APP_VERSION}] Selected shared unison card for auto-distribution: ${sharedCard}`);
+            }
+          }
+          
           // Process one player at a time with delays to prevent race conditions
           for (const player of playersNeedingCards) {
             // Skip if already in the process of distributing to this player
@@ -1228,7 +1323,11 @@ function ConductorView({ onNavigate }) {
             }
             
             console.log(`[${APP_VERSION}] Auto-distributing card to player ${player.name} (${player.id})`);
-            await distributeCardToPlayer(player);
+            if (distributionMode === 'unison') {
+              await distributeCardToPlayer(player, sharedCard);
+            } else {
+              await distributeCardToPlayer(player);
+            }
             
             // Small delay between distributions to prevent overloading
             await new Promise(resolve => setTimeout(resolve, 800));
@@ -1539,6 +1638,42 @@ function ConductorView({ onNavigate }) {
           </button>
         </div>
 
+        {/* Distribution Mode Buttons */}
+        <div style={{ marginBottom: '15px' }}>
+          <h3 className="subheader" style={{ marginBottom: '8px' }}>Distribution Mode</h3>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <button 
+              className={`btn ${distributionMode === 'unison' ? '' : 'btn-outline'}`}
+              style={{ flex: 1, margin: 0 }}
+              onClick={() => handleDistributionModeChange('unison')}
+              disabled={loading || distributionMode === 'unison'}
+            >
+              Unison
+            </button>
+            <button 
+              className={`btn ${distributionMode === 'unique' ? '' : 'btn-outline'}`}
+              style={{ flex: 1, margin: 0 }}
+              onClick={() => handleDistributionModeChange('unique')}
+              disabled={loading || distributionMode === 'unique'}
+            >
+              Unique
+            </button>
+            <button 
+              className={`btn ${distributionMode === 'random' ? '' : 'btn-outline'}`}
+              style={{ flex: 1, margin: 0 }}
+              onClick={() => handleDistributionModeChange('random')}
+              disabled={loading || distributionMode === 'random'}
+            >
+              Random
+            </button>
+          </div>
+          <p className="notice" style={{ marginTop: '5px', textAlign: 'center' }}>
+            {distributionMode === 'unison' ? 'All players get the same card' : 
+             distributionMode === 'unique' ? 'Each player gets a different card' : 
+             'Each player gets a random card'}
+          </p>
+        </div>
+        
         {/* Controls - compact row */}
         <div style={{ 
           display: 'flex', 
@@ -1547,21 +1682,6 @@ function ConductorView({ onNavigate }) {
           marginBottom: '15px',
           flexWrap: 'wrap'
         }}>
-          <select
-            style={{ 
-              flex: '1', 
-              padding: '8px 12px', 
-              borderRadius: '8px', 
-              border: '1px solid var(--border)' 
-            }}
-            value={distributionMode}
-            onChange={(e) => setDistributionMode(e.target.value)}
-          >
-            <option value="unison">Unison Mode</option>
-            <option value="unique">Unique Mode</option>
-            <option value="random">Random Mode</option>
-          </select>
-          
           <select
             style={{ 
               flex: '1', 
@@ -1666,8 +1786,7 @@ function ConductorView({ onNavigate }) {
                 setLoading(true);
                 setError('');
 
-                console.log(`[${APP_VERSION}] Manual distribution started`);
-                let successCount = 0;
+                console.log(`[${APP_VERSION}] Manual distribution started in ${distributionMode} mode`);
                 
                 // Save current settings to session
                 await safeOperation(() =>
@@ -1681,32 +1800,10 @@ function ConductorView({ onNavigate }) {
                   })
                 );
                 
-                // Force all players to be ready for a new card
-                for (const player of players) {
-                  if (player.active) {
-                    await safeOperation(() =>
-                      room.collection('player').update(player.id, {
-                        ready_for_card: true
-                      })
-                    );
-                  }
-                }
+                // Distribute cards to all players using current mode
+                await distributeCardsToAllPlayers();
                 
-                // Wait a moment for updates to process
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                
-                // Distribute cards to each active player
-                for (const player of players) {
-                  if (player.active) {
-                    const success = await distributeCardToPlayer(player);
-                    if (success) successCount++;
-                    // Add delay between distributions
-                    await new Promise(resolve => setTimeout(resolve, 800));
-                  }
-                }
-
-                setTimeout(refreshPlayerList, 2000);
-                setSuccess(`Cards distributed to ${successCount} players`);
+                setSuccess(`Cards distributed to players in ${distributionMode} mode`);
                 setTimeout(() => setSuccess(''), 3000);
               } catch (error) {
                 setError('Distribution failed');
@@ -1783,7 +1880,7 @@ function ConductorView({ onNavigate }) {
                         {timeRemaining !== null && (
                           <span style={{
                             fontWeight: 'bold',
-                            color: timeRemaining < 5 ? 'var(--error)' : 'var(--accent)'// eslint-disable-next-line
+                            color: timeRemaining < 5 ? 'var(--error)' : 'var(--accent)'
                           }}>
                             {timeRemaining}s
                           </span>
