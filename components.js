@@ -661,7 +661,7 @@ function ConductorView({ onNavigate }) {
   }, [showArchivedDecks]);
 
   // Manual refresh for player list
-  const refreshPlayerList = async () => {
+  const refreshPlayerList = async (showSuccess = true) => {
     if (!pin) return;
 
     try {
@@ -683,8 +683,10 @@ function ConductorView({ onNavigate }) {
       })));
       
       setPlayers(playerList);
-      setSuccess('Player list refreshed');
-      setTimeout(() => setSuccess(''), 2000);
+      if (showSuccess) {
+        setSuccess('Player list refreshed');
+        setTimeout(() => setSuccess(''), 2000);
+      }
     } catch (error) {
       setError('Failed to refresh player list');
       console.error('Error refreshing players:', error);
@@ -708,10 +710,32 @@ function ConductorView({ onNavigate }) {
       const unsubscribe = room.collection('player')
         .filter({ session_pin: pin })
         .subscribe(updatedPlayers => {
-          setPlayers(updatedPlayers);
+          console.log(`[${APP_VERSION}] Player subscription update received with ${updatedPlayers.length} players`);
+          setPlayers(prevPlayers => {
+            // Deep comparison to ensure we're actually updating the state
+            const playersChanged = JSON.stringify(prevPlayers) !== JSON.stringify(updatedPlayers);
+            if (playersChanged) {
+              console.log(`[${APP_VERSION}] Updating players state with new data`);
+              return updatedPlayers;
+            }
+            return prevPlayers;
+          });
         });
 
       playersSubscriptionRef.current = unsubscribe;
+      
+      // Add periodic forced refresh to ensure view stays updated
+      const periodicRefresh = setInterval(() => {
+        refreshPlayerList(false); // Silent refresh (no success message)
+      }, 5000);
+      
+      return () => {
+        clearInterval(periodicRefresh);
+        if (playersSubscriptionRef.current) {
+          playersSubscriptionRef.current();
+          playersSubscriptionRef.current = null;
+        }
+      };
     } catch (error) {
       console.error(`[${APP_VERSION}] Error setting up player subscription:`, error);
       setError('Error setting up player tracking');
@@ -1164,8 +1188,14 @@ function ConductorView({ onNavigate }) {
         })
       );
       
+      console.log(`[${APP_VERSION}] Distribution mode changed to: ${newMode}`);
+      
       // Force immediate redistribution to all players
       await distributeCardsToAllPlayers(newMode);
+      
+      // Ensure player list is refreshed after distribution
+      setTimeout(() => refreshPlayerList(), 1500);
+      setTimeout(() => refreshPlayerList(), 3000); // Second refresh for reliability
       
       setSuccess(`Switched to ${newMode} mode and redistributed cards`);
       setTimeout(() => setSuccess(''), 3000);
