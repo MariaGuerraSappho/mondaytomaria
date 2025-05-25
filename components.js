@@ -50,21 +50,47 @@ function JoinView({ onNavigate, initialPin = '' }) {
       const rawPin = pin.trim();
       const cleanPin = rawPin.replace(/\D/g, ''); // Remove any non-digit characters
       
-      // Try both original and cleaned PIN formats
-      let sessions = await safeOperation(() => 
+      console.log(`[${APP_VERSION}] Trying to find session with PIN formats - Raw: "${rawPin}", Clean: "${cleanPin}"`);
+      
+      // Try all possible formats of the PIN to ensure QR code works
+      let sessions = [];
+      
+      // First try with the raw PIN as is
+      sessions = await safeOperation(() => 
         room.collection('session')
-          .filter({ pin: cleanPin })
+          .filter({ pin: rawPin })
           .getList()
       );
       
-      // If no sessions found with cleaned PIN, try with raw PIN
+      // If no sessions found, try with cleaned PIN
       if (sessions.length === 0 && cleanPin !== rawPin) {
-        console.log(`[${APP_VERSION}] No session found with cleaned PIN, trying raw PIN: ${rawPin}`);
+        console.log(`[${APP_VERSION}] No session found with raw PIN, trying cleaned PIN: ${cleanPin}`);
         sessions = await safeOperation(() => 
           room.collection('session')
-            .filter({ pin: rawPin })
+            .filter({ pin: cleanPin })
             .getList()
         );
+      }
+      
+      // As a last resort, try with the PIN as part of URL 
+      if (sessions.length === 0) {
+        console.log(`[${APP_VERSION}] Trying to extract PIN from full URL in case QR code was scanned incorrectly`);
+        // This handles case where the whole URL might be interpreted as the PIN by some QR scanners
+        const urlMatch = rawPin.match(/[?&]pin=([^&]+)/);
+        if (urlMatch && urlMatch[1]) {
+          const extractedPin = urlMatch[1];
+          console.log(`[${APP_VERSION}] Extracted PIN from URL parameter: ${extractedPin}`);
+          sessions = await safeOperation(() => 
+            room.collection('session')
+              .filter({ pin: extractedPin })
+              .getList()
+          );
+          
+          // If we found a session this way, update the pin value
+          if (sessions.length > 0) {
+            setPin(extractedPin);
+          }
+        }
       }
       
       if (sessions.length === 0) {
@@ -1003,7 +1029,9 @@ function ConductorView({ onNavigate }) {
       setLoading(true);
       setError('');
 
-      const sessionPin = generatePin();
+      // Generate numeric PIN and ensure it's clean
+      const sessionPin = generatePin().replace(/\D/g, '');
+      console.log(`[${APP_VERSION}] Creating session with clean numeric PIN: ${sessionPin}`);
 
       const session = await safeOperation(() =>
         room.collection('session').create({
@@ -1424,19 +1452,15 @@ function ConductorView({ onNavigate }) {
     };
   }, [step, autoDistribute, players, selectedDeck, distributionMode, minTimerSeconds, maxTimerSeconds, pin, unisonCardSequence, unisonCardIndex]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (endCountdownRef.current) {
-        clearInterval(endCountdownRef.current);
-      }
-    };
-  }, []);
-
+  // Conductor View Component - QR Code generation fix
   const generateQRCode = useCallback(() => {
     if (!pin || !qrCodeRef.current) return;
     
-    const joinUrl = `${window.baseUrl || window.location.origin}?pin=${pin}`;
+    // Ensure we're using the clean numeric PIN format consistently
+    const cleanPin = pin.trim().replace(/\D/g, '');
+    const joinUrl = `${window.baseUrl || window.location.origin}?pin=${cleanPin}`;
+    
+    console.log(`[${APP_VERSION}] Generating QR code with URL: ${joinUrl}`);
     
     // Generate QR code
     QRCode.toCanvas(qrCodeRef.current, joinUrl, {
@@ -1859,7 +1883,7 @@ function ConductorView({ onNavigate }) {
             max="60"
             value={minTimerSeconds}
             onChange={(e) => {
-              const value = parseInt(e.target.value);
+              const value = Math.max(5, parseInt(e.target.value) || 5);
               setMinTimerSeconds(value);
               if (value > maxTimerSeconds) {
                 setMaxTimerSeconds(value);
