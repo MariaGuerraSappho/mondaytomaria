@@ -46,14 +46,26 @@ function JoinView({ onNavigate, initialPin = '' }) {
     try {
       console.log(`[${APP_VERSION}] Validating session PIN: ${pin}`);
       
-      // FIXED: Simplified PIN filtering to handle numerical pins
-      const cleanPin = pin.trim().replace(/\D/g, ''); // Remove any non-digit characters
+      // More flexible PIN handling - try both original and cleaned versions
+      const rawPin = pin.trim();
+      const cleanPin = rawPin.replace(/\D/g, ''); // Remove any non-digit characters
       
-      const sessions = await safeOperation(() => 
+      // Try both original and cleaned PIN formats
+      let sessions = await safeOperation(() => 
         room.collection('session')
           .filter({ pin: cleanPin })
           .getList()
       );
+      
+      // If no sessions found with cleaned PIN, try with raw PIN
+      if (sessions.length === 0 && cleanPin !== rawPin) {
+        console.log(`[${APP_VERSION}] No session found with cleaned PIN, trying raw PIN: ${rawPin}`);
+        sessions = await safeOperation(() => 
+          room.collection('session')
+            .filter({ pin: rawPin })
+            .getList()
+        );
+      }
       
       if (sessions.length === 0) {
         setError('No active session found with this PIN');
@@ -107,7 +119,7 @@ function JoinView({ onNavigate, initialPin = '' }) {
       setLoading(true);
       setError('');
       
-      // FIXED: Ensure we're using the clean PIN format consistently
+      // Ensure we're using the clean PIN format consistently
       const cleanPin = pin.trim().replace(/\D/g, '');
       
       // Check if player has an existing ID in this session
@@ -647,6 +659,7 @@ function ConductorView({ onNavigate }) {
   const pendingDistributionsRef = useRef(new Set()); // Track players with pending distribution
   const [unisonCardSequence, setUnisonCardSequence] = useState([]);
   const [unisonCardIndex, setUnisonCardIndex] = useState(0);
+  const qrCodeRef = useRef(null);
 
   // Load decks
   useEffect(() => {
@@ -1420,6 +1433,31 @@ function ConductorView({ onNavigate }) {
     };
   }, []);
 
+  const generateQRCode = useCallback(() => {
+    if (!pin || !qrCodeRef.current) return;
+    
+    const joinUrl = `${window.baseUrl || window.location.origin}?pin=${pin}`;
+    
+    // Generate QR code
+    QRCode.toCanvas(qrCodeRef.current, joinUrl, {
+      width: 200,
+      margin: 2,
+      color: {
+        dark: '#ff4e8a',
+        light: '#ffffff'
+      }
+    }, (error) => {
+      if (error) console.error(`[${APP_VERSION}] QR Code error:`, error);
+    });
+  }, [pin]);
+
+  // Use effect to generate QR code when pin changes
+  useEffect(() => {
+    if (pin && step === 'session') {
+      setTimeout(generateQRCode, 100);
+    }
+  }, [pin, step, generateQRCode]);
+
   if (step === 'setup') {
     return (
       <div className="container">
@@ -1660,51 +1698,62 @@ function ConductorView({ onNavigate }) {
           </div>
         </div>
 
-        {/* Share section - compact */}
+        {/* Share section with QR code */}
         <div style={{ 
-          display: 'flex', 
-          alignItems: 'center', 
-          gap: '10px', 
           backgroundColor: '#f9f9f9', 
-          padding: '10px', 
+          padding: '15px', 
           borderRadius: '8px', 
-          marginBottom: '15px' 
+          marginBottom: '15px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center'
         }}>
-          <input
-            type="text"
-            className="input"
-            readOnly
-            value={`${window.baseUrl || window.location.origin}?pin=${pin}`}
-            onClick={(e) => e.target.select()}
-            style={{ margin: 0, flex: 1 }}
-          />
-          <button
-            className="btn"
-            style={{ margin: 0, whiteSpace: 'nowrap' }}
-            onClick={() => {
-              const url = `${window.baseUrl || window.location.origin}?pin=${pin}`;
-              navigator.clipboard.writeText(url)
-                .then(() => {
-                  setSuccess("Link copied!");
-                  setTimeout(() => setSuccess(''), 2000);
-                })
-                .catch(() => {
-                  // Fallback
-                  const textArea = document.createElement("textarea");
-                  textArea.value = url;
-                  document.body.appendChild(textArea);
-                  textArea.select();
-                  document.execCommand('copy');
-                  document.body.removeChild(textArea);
-                  setSuccess("Link copied!");
-                  setTimeout(() => setSuccess(''), 2000);
-                });
-            }}
-          >
-            Copy Link
-          </button>
+          <div style={{ marginBottom: '10px', width: '100%' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '100%' }}>
+              <input
+                type="text"
+                className="input"
+                readOnly
+                value={`${window.baseUrl || window.location.origin}?pin=${pin}`}
+                onClick={(e) => e.target.select()}
+                style={{ margin: 0, flex: 1 }}
+              />
+              <button
+                className="btn"
+                style={{ margin: 0, whiteSpace: 'nowrap' }}
+                onClick={() => {
+                  const url = `${window.baseUrl || window.location.origin}?pin=${pin}`;
+                  navigator.clipboard.writeText(url)
+                    .then(() => {
+                      setSuccess("Link copied!");
+                      setTimeout(() => setSuccess(''), 2000);
+                    })
+                    .catch(() => {
+                      // Fallback
+                      const textArea = document.createElement("textarea");
+                      textArea.value = url;
+                      document.body.appendChild(textArea);
+                      textArea.select();
+                      document.execCommand('copy');
+                      document.body.removeChild(textArea);
+                      setSuccess("Link copied!");
+                      setTimeout(() => setSuccess(''), 2000);
+                    });
+                }}
+              >
+                Copy Link
+              </button>
+            </div>
+          </div>
+          
+          <div className="qr-container">
+            <canvas ref={qrCodeRef} className="qr-code"></canvas>
+            <div style={{ textAlign: 'center', fontSize: '14px', fontWeight: 'bold' }}>
+              Scan to join or enter PIN: <span style={{ color: 'var(--primary)' }}>{pin}</span>
+            </div>
+          </div>
         </div>
-
+        
         {/* Distribution Mode Buttons */}
         <div style={{ marginBottom: '15px' }}>
           <h3 className="subheader" style={{ marginBottom: '8px' }}>Distribution Mode</h3>

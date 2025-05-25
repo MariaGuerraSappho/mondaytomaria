@@ -20,7 +20,12 @@ const { createRoot } = ReactDOM;
 const CARD_RECEIVED_CHECK_INTERVAL = 250; // ms
 
 // Helper Functions
-const generatePin = () => Math.floor(100000 + Math.random() * 900000).toString();
+const generatePin = () => {
+  // Generate a 6-digit PIN that's easier to type and read
+  const pin = Math.floor(100000 + Math.random() * 900000).toString();
+  console.log(`[${APP_VERSION}] Generated PIN: ${pin}`);
+  return pin;
+};
 
 const safeOperation = async (operation, retries = 3) => {
   let lastError;

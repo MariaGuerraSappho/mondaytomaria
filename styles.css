@@ -412,6 +412,24 @@ button, input, select, textarea {
   border-radius: 4px;
 }
 
+/* QR code styles */
+.qr-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background-color: white;
+  padding: 15px;
+  border-radius: 8px;
+  margin: 15px 0;
+  box-shadow: 0 4px 8px var(--shadow);
+}
+
+.qr-code {
+  margin-bottom: 10px;
+  max-width: 200px;
+  max-height: 200px;
+}
+
 /* Media queries */
 @media (max-width: 600px) {
   .container {
